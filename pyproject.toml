@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "taskflow-api"
+version = "1.0.0"
+description = "Task Management SaaS API"
+authors = ["Reza Hosseini <hosseini.reza65@gmail.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+Django = "^5.2"
+djangorestframework = "^3.16"
+django-filter = "^23.5"
+django-cors-headers = "^4.4"
+django-environ = "^0.11"
+psycopg = "^3.2"
+Pillow = "^10.4"
+djangorestframework-simplejwt = "^5.3"
+cryptography = "^42.0"  # اضافه کنید
+
+celery = {extras = ["redis"], version = "^5.4"}
+django-celery-results = "^2.5"
+django-celery-beat = "^2.7"
+django-redis = "^5.4"
+redis = "^5.0"
+
+drf-spectacular = "^0.27"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2"
+pytest-django = "^4.7"
+black = "^24.4"
+flake8 = "^7.0"
