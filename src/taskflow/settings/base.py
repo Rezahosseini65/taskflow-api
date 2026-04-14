@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from django.conf.global_settings import AUTH_USER_MODEL
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -18,8 +20,10 @@ ALLOWED_HOSTS = []
 
 # Application definition
 
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
 LOCAL_APPS = [
-    'taskflow.accounts.apps.AccountsConfig'
+    'src.taskflow.accounts.apps.AccountsConfig'
 ]
 
 THIRD_PARTY_APPS = [
@@ -103,6 +107,8 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
     },
 ]
+
+AUTH_USER_MODEL = 'accounts.CustomUser'
 
 
 # Internationalization
