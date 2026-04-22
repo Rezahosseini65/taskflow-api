@@ -9,6 +9,7 @@ from rest_framework.response import Response
 
 from .serializers import UserRegisterSerializer
 from .models import CustomUser
+from .throttles import UserRegisterThrottle
 from taskflow.utils.services import TokenCookieManager, generate_access_refresh_tokens
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class UserRegisterView(APIView):
     and refresh tokens, and sets these tokens as HTTP-only cookies in the response.
     The entire process is wrapped in a database transaction to ensure atomicity.
     """
+    throttle_classes = [UserRegisterThrottle]
     def post(self, request):
 
         serializer = UserRegisterSerializer(data=request.data)
