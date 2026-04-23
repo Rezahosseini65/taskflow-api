@@ -7,9 +7,9 @@ from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
 
-from .serializers import UserRegisterSerializer
+from .serializers import UserRegisterSerializer, UserLoginSerializer
 from .models import CustomUser
-from .throttles import UserRegisterThrottle
+from .throttles import UserRegisterThrottle, UserLoginThrottle
 from taskflow.utils.services import TokenCookieManager, generate_access_refresh_tokens
 
 logger = logging.getLogger(__name__)
@@ -64,3 +64,34 @@ class UserRegisterView(APIView):
         logger.warning(f"Register validation failed: {serializer.errors}")
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+class UserLoginView(APIView):
+
+    throttle_classes = [UserLoginThrottle]
+    def post(self, request):
+
+        serializer = UserLoginSerializer(data=request.data)
+
+        if serializer.is_valid():
+            try:
+                user = serializer.validated_data.get("user")
+                access_token, refresh_token = generate_access_refresh_tokens(user=user)
+
+                response = Response(
+                    {'detail':'Login successful'},
+                    status=status.HTTP_200_OK
+                )
+
+                TokenCookieManager.set_access_cookie(response, access_token)
+                TokenCookieManager.set_refresh_cookie(response, refresh_token)
+
+                return response
+
+            except Exception as e:
+                logger.error(f"User login failed: {str(e)}", exc_info=True)
+                if settings.DEBUG:
+                    return Response(
+                        {"detail": f"An error occurred: {str(e)}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+        logger.warning(f"Login validation failed: {serializer.errors}")
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

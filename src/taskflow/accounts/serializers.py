@@ -1,3 +1,4 @@
+from django.contrib.auth import authenticate
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
 
@@ -5,6 +6,7 @@ from rest_framework import serializers
 
 from .validators import validate_strong_password
 from .models import CustomUser
+
 
 class UserRegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
@@ -44,3 +46,26 @@ class UserRegisterSerializer(serializers.Serializer):
             )
 
         return data
+
+
+class UserLoginSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
+    password = serializers.CharField(
+        required=True,
+        style={'input_type':'password'},
+        write_only=True
+    )
+
+    def validate(self, attrs)-> dict:
+        email = attrs.get("email")
+        password = attrs.get("password")
+
+        user = authenticate(email=email, password=password)
+
+        if not user:
+            raise ValidationError(
+                _("Your email or password is incorrect, please try again")
+            )
+
+        attrs["user"] = user
+        return attrs
