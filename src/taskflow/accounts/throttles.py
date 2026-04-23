@@ -8,3 +8,12 @@ class UserRegisterThrottle(SimpleRateThrottle):
         # For registration, we should throttle based on IP address
         # as the user is not yet authenticated.
         return self.get_ident(request)
+
+
+class UserLoginThrottle(SimpleRateThrottle):
+    scope = 'user_login_throttle'
+
+    def get_cache_key(self, request, view):
+        # For login, we should throttle based on IP address
+        # as the user is not yet authenticated.
+        return self.get_ident(request)
