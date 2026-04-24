@@ -6,6 +6,8 @@ from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .serializers import UserRegisterSerializer, UserLoginSerializer
 from .models import CustomUser
@@ -95,3 +97,41 @@ class UserLoginView(APIView):
                     )
         logger.warning(f"Login validation failed: {serializer.errors}")
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class RefreshAccessTokenView(APIView):
+    """
+    Handles POST requests to refresh the access token.
+
+    Reads the 'refresh_token' from the request cookies. If found and valid,
+    it generates a new access token and returns a success response with the
+    new token set as an HTTP-only cookie. If the refresh token is missing
+    or invalid, it returns an appropriate error response.
+    """
+    permission_classes = [IsAuthenticated]
+    def post(self, request):
+        refresh_token = request.COOKIES.get('refresh_token')
+        if refresh_token is None:
+            return Response(
+                {'detail': 'No refresh token found'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            refresh = RefreshToken(refresh_token)
+            access_token = str(refresh.access_token)
+
+            response = Response(
+                {'detail': 'access token set'}
+            )
+
+            TokenCookieManager.set_access_cookie(response, access_token)
+
+            return response
+
+        except Exception as e:
+            logger.error(f"detail: Token is invalid or expired. {str(e)}", exc_info=True)
+            if settings.DEBUG:
+                return Response(
+                    {"detail": f"An error occurred: {str(e)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )

@@ -1,5 +1,5 @@
 import datetime
-import logging # Assuming logger is used elsewhere or might be needed
+import logging
 
 from django.conf import settings
 from django.utils import timezone
@@ -81,3 +81,5 @@ class TokenCookieManager:
         response.delete_cookie(settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"])
 
         return response
+
+
