@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-      target: runtime  # اضافه کنید
+      target: runtime
     container_name: taskflow_web
     command: python src/manage.py runserver 0.0.0.0:8000
     volumes:
