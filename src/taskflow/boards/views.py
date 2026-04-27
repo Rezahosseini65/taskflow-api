@@ -27,7 +27,7 @@ class BoardCreateView(APIView):
         if serializer.is_valid():
             validated_data = serializer.validated_data
             members = validated_data.pop('members', [])
-            slug = validated_data.get('slug')
+            slug = validated_data.pop('slug', None)
 
             try:
                 if not slug:
