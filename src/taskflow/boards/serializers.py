@@ -29,3 +29,17 @@ class BoardCreateSerializer(serializers.ModelSerializer):
         if Board.objects.filter(slug=value):
             raise serializers.ValidationError("A board with this slug already exists.")
         return value
+
+class UserSimpleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = ('id', 'email')
+
+
+class BoardListSerializer(serializers.ModelSerializer):
+    owner = UserSimpleSerializer()
+
+    class Meta:
+        model = Board
+        fields = ('id', 'name', 'slug', 'owner', 'created_at')
+        read_only_fields = ('id', 'name', 'slug', 'owner', 'created_at')

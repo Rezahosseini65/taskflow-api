@@ -67,7 +67,7 @@ class UserRegisterView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class UserLoginView(APIView):
-    #TODO: 
+    #TODO: UserLoginThrottle will be enabled later
     #throttle_classes = [UserLoginThrottle]
     def post(self, request):
 
