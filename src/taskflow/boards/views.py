@@ -76,7 +76,6 @@ from django.db import connection, reset_queries
 class OwnerBoardListView(APIView):
 
     permission_classes = [IsAuthenticated]
-    pagination_class = StandardResultsSetPagination
 
     def get(self, request):
 
