@@ -1,10 +1,12 @@
 import logging
 
 from django.db import transaction
+from django.db.models import Prefetch
 from django.utils.text import slugify
 from django.conf import settings
 from django.core.cache import cache
 
+from rest_framework.generics import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -14,8 +16,10 @@ from .models import Board
 from .paginations import StandardResultsSetPagination
 from .serializers import (
     BoardCreateSerializer,
-    BoardListSerializer
+    BoardListSerializer,
+    BoardDetailSerializer
 )
+from taskflow.accounts.models import CustomUser
 
 
 logger = logging.getLogger(__name__)
@@ -91,7 +95,7 @@ class OwnerBoardListView(APIView):
                 # print(f"تعداد کویری‌های اجرا شده برای این ویو: {len(connection.queries)}")
                 # for q in connection.queries:
                 #     print(q['sql'])
-                cache.set(cache_key, serializer.data, 60 * 60 * 24)
+                cache.set(cache_key, serializer.data, 60 * 60 * 15)
                 return Response(
                     serializer.data,
                     status=status.HTTP_200_OK
@@ -115,3 +119,36 @@ class OwnerBoardListView(APIView):
                 {"detail": "An internal server error occurred."},
                       status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
+
+
+class OwnerBoardDetailView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get_cache_key(self, user_id, board_pk):
+        return f'owner_board_detail_{board_pk}_user_{user_id}'
+
+    def get(self, request, pk):
+        cache_key = self.get_cache_key(request.user.id, pk)
+        cached_data = cache.get(cache_key)
+
+        if cached_data:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        board = get_object_or_404(
+            Board.objects
+            .select_related('owner')
+            .prefetch_related(
+                Prefetch('members',
+                         queryset=CustomUser.objects.only('id', 'email'))
+            ),
+            owner=request.user,
+            pk=pk
+        )
+
+        serializer = BoardDetailSerializer(board)
+        cache.set(cache_key, serializer.data, 60 * 15)
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+

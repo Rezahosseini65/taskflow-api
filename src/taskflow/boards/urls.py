@@ -2,7 +2,8 @@ from django.urls import path
 
 from .views import (
     BoardCreateView,
-    OwnerBoardListView
+    OwnerBoardListView,
+    OwnerBoardDetailView
 )
 
 urlpatterns = [
@@ -15,5 +16,10 @@ urlpatterns = [
         'owned/list/',
         OwnerBoardListView.as_view(),
         name='board-owned-list'
-    )
+    ),
+    path(
+        'owned/detail/<int:pk>/',
+        OwnerBoardDetailView.as_view(),
+        name='board-owned-detail'
+    ),
 ]

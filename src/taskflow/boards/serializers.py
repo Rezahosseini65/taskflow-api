@@ -43,3 +43,29 @@ class BoardListSerializer(serializers.ModelSerializer):
         model = Board
         fields = ('id', 'name', 'slug', 'owner', 'created_at')
         read_only_fields = ('id', 'name', 'slug', 'owner', 'created_at')
+
+
+class BoardDetailSerializer(serializers.ModelSerializer):
+    owner = UserSimpleSerializer()
+    members = UserSimpleSerializer(many=True)
+
+    class Meta:
+        model = Board
+        fields = (
+            'id',
+            'name',
+            'slug',
+            'description',
+            'owner',
+            'members',
+            'created_at'
+        )
+        read_only_fields = (
+            'id',
+            'name',
+            'slug',
+            'description',
+            'owner',
+            'members',
+            'created_at'
+        )

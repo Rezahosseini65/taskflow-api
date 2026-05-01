@@ -141,6 +141,7 @@ class CreateBoardViewTest(APITestCase):
 
 #-------------------------------------------Owner Board List View Test---------------------------------------
 
+
 class OwnerBoardListViewTest(APITestCase):
 
     def setUp(self):
