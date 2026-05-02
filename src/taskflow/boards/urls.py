@@ -3,7 +3,8 @@ from django.urls import path
 from .views import (
     BoardCreateView,
     OwnerBoardListView,
-    OwnerBoardDetailView
+    OwnerBoardDetailView,
+    MemberBoardListView
 )
 
 urlpatterns = [
@@ -22,4 +23,9 @@ urlpatterns = [
         OwnerBoardDetailView.as_view(),
         name='board-owned-detail'
     ),
+    path(
+        'member/list/',
+        MemberBoardListView.as_view(),
+        name='board-member-list'
+    )
 ]

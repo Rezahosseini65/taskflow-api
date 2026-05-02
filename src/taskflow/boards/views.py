@@ -108,7 +108,7 @@ class OwnerBoardListView(APIView):
 
         except Exception as e:
 
-            logger.error(f"List board failed: {str(e)}", exc_info=True)
+            logger.error(f"Owner List board failed: {str(e)}", exc_info=True)
             if settings.DEBUG:
                 return Response(
                     {"detail": f"An error occurred: {str(e)}"},
@@ -152,3 +152,46 @@ class OwnerBoardDetailView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class MemberBoardListView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get_cache_key(self, user_id):
+        return f'member_board_list_user_{user_id}'
+
+    def get(self, request):
+        cache_key = self.get_cache_key(request.user.id)
+        cached_data = cache.get(cache_key)
+
+        if cached_data:
+            return Response(
+                cached_data,
+                status=status.HTTP_200_OK
+            )
+        try:
+            boards = Board.objects.filter(members=request.user) \
+                .exclude(owner=request.user) \
+                .select_related("owner") \
+                .only('id', 'name', 'slug', 'created_at', 'owner__id', 'owner__email')
+
+            serializer = BoardListSerializer(boards, many=True)
+
+            cache.set(cache_key, serializer.data, 60 * 15)
+
+            return Response(
+                serializer.data,
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            logger.error(f"Member List board failed: {str(e)}", exc_info=True)
+            if settings.DEBUG:
+                return Response(
+                    {"detail": f"An error occurred: {str(e)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            return Response(
+                {"detail": "An internal server error occurred."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
