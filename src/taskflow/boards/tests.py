@@ -345,5 +345,172 @@ class OwnerBoardListViewTest(APITestCase):
             self.assertNotIn(board["name"], user1_board_name)
 
 
+#-------------------------------------------Owner Board Detail View Test---------------------------------------
 
 
+class OwnerBoardDetailViewTest(APITestCase):
+
+    def setUp(self):
+        cache.clear()
+
+        self.owner = CustomUser.objects.create_user(
+            email='owner@example.com',
+            password='ownerPass123'
+        )
+
+        self.other_user = CustomUser.objects.create_user(
+            email='other@example.com',
+            password='otherPass123'
+        )
+
+        self.board = Board.objects.create(
+            name='Test Board',
+            slug='test-board',
+            description='Test Description',
+            owner=self.owner
+        )
+
+        self.board.members.add(self.other_user)
+
+        self.url = reverse('board-owned-detail', kwargs={'pk': self.board.pk})
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_get_board_success_by_owner(self):
+        """تست موفقیت آمیز دریافت برد توسط مالک"""
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.board.id)
+        self.assertEqual(response.data['name'], self.board.name)
+        self.assertEqual(response.data['owner']['id'], self.owner.id)
+        self.assertIn('members', response.data)
+
+    def test_get_board_by_non_owner_returns_404(self):
+        """تست دریافت برد توسط کاربر غیر مالک - باید 404 برگردد"""
+        self.client.force_authenticate(user=self.other_user)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_get_board_unauthenticated_returns_401(self):
+        """تست دریافت برد بدون احراز هویت - باید 401 برگردد"""
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_get_non_existent_board_returns_404(self):
+        """تست دریافت برد ناموجود"""
+        self.client.force_authenticate(user=self.owner)
+        invalid_url = reverse('board-owned-detail', kwargs={'pk': 99999})
+
+        response = self.client.get(invalid_url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cache_works_first_request(self):
+        """تست اینکه اولین درخواست داده را در کش ذخیره می‌کند"""
+
+        self.client.force_authenticate(user=self.owner)
+
+        cache.clear()
+
+        response1 = self.client.get(self.url)
+
+        # بررسی اینکه داده در کش ذخیره شده
+        cache_key = f'owner_board_detail_{self.board.pk}_user_{self.owner.id}'
+
+        cached_data = cache.get(cache_key)
+
+        self.assertIsNotNone(cached_data)
+        self.assertEqual(cached_data['id'], self.board.id)
+        self.assertEqual(response1.data, cached_data)
+
+    def test_cache_returns_cached_data_on_second_request(self):
+        """تست اینکه درخواست دوم داده را از کش برمی دارد"""
+        self.client.force_authenticate(user=self.owner)
+
+        _ = self.client.get(self.url)
+
+        Board.objects.get(id=self.board.id).delete()
+
+        response2 = self.client.get(self.url)
+
+        self.assertEqual(response2.status_code, status.HTTP_200_OK)
+        self.assertEqual(response2.data["id"], self.board.id)
+
+    def test_different_users_have_different_caches(self):
+        other_board = Board.objects.create(
+            name='Other Board',
+            slug='other-board',
+            owner=self.other_user
+        )
+        other_url = reverse('board-owned-detail', kwargs={'pk': other_board.pk})
+
+        self.client.force_authenticate(user=self.owner)
+        self.client.get(self.url)
+
+        self.client.force_authenticate(user=self.other_user)
+        self.client.get(other_url)
+
+        cache_key_owner = f'owner_board_detail_{self.board.pk}_user_{self.owner.id}'
+        cache_key_other = f'owner_board_detail_{other_board.pk}_user_{self.other_user.id}'
+
+        self.assertIsNotNone(cache.get(cache_key_owner))
+        self.assertIsNotNone(cache.get(cache_key_other))
+        self.assertNotEqual(cache_key_owner, cache_key_other)
+
+    @patch('taskflow.boards.views.cache.set')
+    def test_cache_set_called_with_correct_timeout(self, mock_cache_set):
+        self.client.force_authenticate(user=self.owner)
+
+        self.client.get(self.url)
+
+        call_args = mock_cache_set.call_args
+        self.assertIsNotNone(call_args)
+        self.assertEqual(call_args[0][2], 60 * 15)
+
+    def test_select_related_and_prefetch_related_optimization(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self.client.force_authenticate(user=self.owner)
+
+        with CaptureQueriesContext(connection) as queries:
+            self.client.get(self.url)
+
+        self.assertLess(len(queries.captured_queries), 3)
+
+        owner_loaded = any(
+            '"owner"' in query['sql'].lower() or 'owner_id' in query['sql'].lower()
+            for query in queries.captured_queries
+        )
+        self.assertTrue(owner_loaded)
+
+    def test_members_only_contains_id_and_email(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.url)
+
+        if 'members' in response.data and len(response.data['members']) > 0:
+            member = response.data['members'][0]
+            self.assertIn('id', member)
+            self.assertIn('email', member)
+            self.assertNotIn('password', member)
+
+    def test_cache_invalidation_on_board_update(self):
+        self.client.force_authenticate(user=self.owner)
+
+        response1 = self.client.get(self.url)
+
+        self.board.name = "Updated Title"
+        self.board.save()
+
+        response2 = self.client.get(self.url)
+
+        self.assertEqual(response2.data['name'], 'Test Board')
+        self.assertNotEqual(response2.data['name'], 'Updated Title')
