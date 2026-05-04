@@ -2,6 +2,7 @@ import logging
 
 from django.db import transaction
 from django.db.models import Prefetch, Q
+from django.http import Http404
 from django.utils.text import slugify
 from django.conf import settings
 from django.core.cache import cache
@@ -239,6 +240,11 @@ class MemberBoardDetailView(APIView):
             return Response(
                 serializer.data,
                 status=status.HTTP_200_OK
+            )
+        except Http404:
+            return Response(
+                {"detail": "Board not found or you don't have access."},
+                status=status.HTTP_404_NOT_FOUND
             )
 
         except Exception as e:
