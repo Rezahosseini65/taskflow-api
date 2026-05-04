@@ -1,7 +1,7 @@
 import logging
 
 from django.db import transaction
-from django.db.models import Prefetch
+from django.db.models import Prefetch, Q
 from django.utils.text import slugify
 from django.conf import settings
 from django.core.cache import cache
@@ -185,6 +185,64 @@ class MemberBoardListView(APIView):
 
         except Exception as e:
             logger.error(f"Member List board failed: {str(e)}", exc_info=True)
+            if settings.DEBUG:
+                return Response(
+                    {"detail": f"An error occurred: {str(e)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            return Response(
+                {"detail": "An internal server error occurred."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class MemberBoardDetailView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get_cache_key(self, user_id:int, board_pk:int)-> str:
+        return f'member_board_detail_{board_pk}_user_{user_id}'
+
+    def get(self, request, pk):
+        try:
+            cache_key = self.get_cache_key(request.user.id, pk)
+            cached_data = cache.get(cache_key)
+
+            if cached_data is not None:
+                return Response(
+                    cached_data,
+                    status=status.HTTP_200_OK
+                )
+
+            board = get_object_or_404(
+                Board.objects.filter(
+                    Q(members=request.user) & ~Q(owner=request.user)
+                ).select_related(
+                    'owner'
+                ).only(
+                    'id', 'name', 'slug', 'description', 'created_at', 'updated_at',  # فیلدهای Board
+                    'owner__id', 'owner__email'
+                ).prefetch_related(
+                    Prefetch(
+                        'members',
+                        queryset=CustomUser.objects.only('id', 'email')
+                    )
+                ),
+                pk=pk
+            )
+
+            serializer = BoardDetailSerializer(board)
+
+            cache.set(cache_key, serializer.data, 60 * 15)
+
+            return Response(
+                serializer.data,
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            logger.error(f"Member Detail board failed: {str(e)}", exc_info=True)
             if settings.DEBUG:
                 return Response(
                     {"detail": f"An error occurred: {str(e)}"},

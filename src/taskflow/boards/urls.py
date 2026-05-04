@@ -4,7 +4,8 @@ from .views import (
     BoardCreateView,
     OwnerBoardListView,
     OwnerBoardDetailView,
-    MemberBoardListView
+    MemberBoardListView,
+    MemberBoardDetailView
 )
 
 urlpatterns = [
@@ -27,5 +28,10 @@ urlpatterns = [
         'member/list/',
         MemberBoardListView.as_view(),
         name='board-member-list'
+    ),
+    path(
+        'member/detail/<int:pk>/',
+        MemberBoardDetailView.as_view(),
+        name='board-member-detail'
     )
 ]
