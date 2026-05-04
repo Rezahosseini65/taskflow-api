@@ -909,3 +909,245 @@ class MemberBoardListViewTests(APITestCase):
         """Test that response has correct content type"""
         response = self.client.get(self.url)
         self.assertEqual(response['Content-Type'], 'application/json')
+
+#-------------------------------------------Member Board Detail View Test---------------------------------------
+
+class MemberBoardDetailViewTests(APITestCase):
+
+    def setUp(self):
+
+        self.owner = CustomUser.objects.create_user(
+            email='owner@test.com',
+            password='testPass123'
+        )
+        self.member = CustomUser.objects.create_user(
+            email='member@test.com',
+            password='testPass123'
+        )
+        self.non_member = CustomUser.objects.create_user(
+            email='nonmember@test.com',
+            password='testPass123'
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email='other@test.com',
+            password='testPass123'
+        )
+
+        self.board = Board.objects.create(
+            name='Test Board',
+            slug='test-board',
+            description='Test Description',
+            owner=self.owner
+        )
+
+        self.board.members.add(self.member)
+
+        self.url = reverse('board-member-detail', kwargs={'pk': self.board.pk})
+
+        self.client = APIClient()
+
+    def test_authenticated_member_can_view_board(self):
+        """تست: کاربر عضو می‌تواند برد را ببیند"""
+        self.client.force_authenticate(user=self.member)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['id'], self.board.id)
+        self.assertEqual(response.data['name'], 'Test Board')
+        self.assertEqual(response.data['owner']['id'], self.owner.id)
+        self.assertEqual(response.data['owner']['email'], self.owner.email)
+
+        # بررسی اینکه members لیست شده
+        members_emails = [m['email'] for m in response.data['members']]
+        self.assertIn(self.member.email, members_emails)
+
+    def test_owner_cannot_view_their_own_board(self):
+        """تست: مالک نمی‌تواند برد خودش را از این endpoint ببیند"""
+        self.client.force_authenticate(user=self.owner)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_non_member_cannot_view_board(self):
+        """تست: کاربر غیر عضو نمی‌تواند برد را ببیند"""
+        self.client.force_authenticate(user=self.non_member)
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_unauthenticated_user_cannot_view_board(self):
+        """تست: کاربر احراز هویت نشده نمی‌تواند برد را ببیند"""
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_nonexistent_board_returns_404(self):
+        """تست: برد ناموجود خطای 404 برمی‌گرداند"""
+        self.client.force_authenticate(user=self.member)
+        invalid_url = reverse('board-member-detail', kwargs={'pk': 99999})
+
+        response = self.client.get(invalid_url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cache_returns_cached_data(self):
+        """تست: کش به درستی کار می‌کند"""
+        self.client.force_authenticate(user=self.member)
+
+        # درخواست اول (کش نمیشود)
+        with patch('taskflow.boards.views.cache.get') as mock_cache_get:
+            mock_cache_get.return_value = None
+            response1 = self.client.get(self.url)
+
+        # درخواست دوم (از کش می‌خواند)
+        with patch('taskflow.boards.views.cache.get') as mock_cache_get:
+            mock_cache_get.return_value = response1.data
+            response2 = self.client.get(self.url)
+
+            # بررسی اینکه از کش استفاده شده
+            mock_cache_get.assert_called()
+            self.assertEqual(response2.data, response1.data)
+
+    def test_cache_key_is_user_specific(self):
+        """تست: کلید کش برای هر کاربر متفاوت است"""
+        # ایجاد کاربر عضو دوم
+        member2 = CustomUser.objects.create_user(
+            email='member2@test.com',
+            password='testPass123'
+        )
+        self.board.members.add(member2)
+
+        self.client.force_authenticate(user=self.member)
+        response1 = self.client.get(self.url)
+
+        self.client.force_authenticate(user=member2)
+        response2 = self.client.get(self.url)
+
+        # هر دو باید موفق باشند
+        self.assertEqual(response1.status_code, status.HTTP_200_OK)
+        self.assertEqual(response2.status_code, status.HTTP_200_OK)
+
+    def test_response_structure_is_correct(self):
+        """تست: ساختار پاسخ صحیح است"""
+        self.client.force_authenticate(user=self.member)
+
+        response = self.client.get(self.url)
+
+        expected_fields = {
+            'id', 'name', 'slug', 'description',
+            'created_at', 'owner', 'members'
+        }
+
+        self.assertEqual(set(response.data.keys()), expected_fields)
+        self.assertIn('id', response.data['owner'])
+        self.assertIn('email', response.data['owner'])
+
+        # بررسی اینکه password در پاسخ نیست
+        self.assertNotIn('password', response.data['owner'])
+
+        if response.data['members']:
+            self.assertNotIn('password', response.data['members'][0])
+
+    def test_only_allowed_fields_are_returned(self):
+        """تست: فقط فیلدهای مجاز برگردانده می‌شوند"""
+        self.client.force_authenticate(user=self.member)
+
+        response = self.client.get(self.url)
+
+        # فیلدهای حساس نباید باشند
+        self.assertNotIn('password', response.data)
+        self.assertNotIn('owner__password', response.data)
+
+        # فیلدهای اصلی باید باشند
+        self.assertIn('id', response.data)
+        self.assertIn('name', response.data)
+
+    def test_database_query_count(self):
+        """تست: تعداد کوئری‌های دیتابیس بهینه است"""
+        self.client.force_authenticate(user=self.member)
+
+        # تعداد کوئری‌ها را بشمار
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(self.url)
+
+        # باید حداکثر 3-4 کوئری داشته باشیم (auth + main queries)
+        self.assertLess(len(queries.captured_queries), 5)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_board_with_no_members(self):
+        """تست: برد بدون عضو"""
+        empty_board = Board.objects.create(
+            name='Empty Board',
+            slug='empty-board',
+            description='No members',
+            owner=self.other_user
+        )
+        empty_board.members.add(self.member)  # فقط member را اضافه کن
+
+        url = reverse('board-member-detail', kwargs={'pk': empty_board.pk})
+        self.client.force_authenticate(user=self.member)
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data['members']), 1)  # فقط خود member
+
+    def test_concurrent_cache_access(self):
+        """تست: دسترسی همزمان به کش"""
+        self.client.force_authenticate(user=self.member)
+
+        # چند درخواست همزمان
+        responses = []
+        for _ in range(5):
+            response = self.client.get(self.url)
+            responses.append(response)
+
+        # همه باید موفق باشند
+        for response in responses:
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # همه باید داده یکسان داشته باشند
+        first_data = responses[0].data
+        for response in responses[1:]:
+            self.assertEqual(response.data, first_data)
+
+    @patch('taskflow.boards.views.logger')
+    def test_error_logging_on_exception(self, mock_logger):
+        """تست: لاگ کردن خطاها"""
+        self.client.force_authenticate(user=self.member)
+
+        # ایجاد خطای عمدی
+        with patch('taskflow.boards.views.Board.objects.filter') as mock_filter:
+            mock_filter.side_effect = Exception("Simulated database error")
+
+            response = self.client.get(self.url)
+
+            # بررسی لاگ
+            mock_logger.error.assert_called_once()
+            self.assertIn("Member Detail board failed", mock_logger.error.call_args[0][0])
+
+    def test_cache_timeout(self):
+        """تست: زمان انقضای کش"""
+        self.client.force_authenticate(user=self.member)
+
+        # درخواست اول
+        response1 = self.client.get(self.url)
+
+        # شبیه‌سازی زمان گذشته
+        with patch('django.core.cache.cache.get') as mock_get:
+            mock_get.return_value = None
+            response2 = self.client.get(self.url)
+
+            # باید دوباره از دیتابیس بخواند
+            mock_get.assert_called()
+
+    def tearDown(self):
+        """پاک‌سازی بعد از هر تست"""
+        cache.clear()
+        super().tearDown()
