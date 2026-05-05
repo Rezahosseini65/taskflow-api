@@ -58,7 +58,8 @@ class BoardDetailSerializer(serializers.ModelSerializer):
             'description',
             'owner',
             'members',
-            'created_at'
+            'created_at',
+            'updated_at',
         )
         read_only_fields = (
             'id',
