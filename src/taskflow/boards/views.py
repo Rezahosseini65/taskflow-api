@@ -140,12 +140,15 @@ class OwnerBoardDetailView(APIView):
 
         board = get_object_or_404(
             Board.objects
+            .filter(owner=request.user, is_active=True)
             .select_related('owner')
-            .prefetch_related(
+            .only(
+                'id', 'name', 'slug', 'description', 'created_at','updated_at',
+                'owner__id', 'owner__email'
+            ).prefetch_related(
                 Prefetch('members',
                          queryset=CustomUser.objects.only('id', 'email'))
             ),
-            owner=request.user,
             pk=pk
         )
 
