@@ -44,6 +44,11 @@ class Board(models.Model):
         help_text=_('Users who have access to this board besides the owner.')
     )
 
+    is_active = models.BooleanField(
+        _('active board'),
+        default=True
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
