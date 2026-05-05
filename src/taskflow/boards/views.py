@@ -98,7 +98,7 @@ class OwnerBoardListView(APIView):
                 # print(f"تعداد کویری‌های اجرا شده برای این ویو: {len(connection.queries)}")
                 # for q in connection.queries:
                 #     print(q['sql'])
-                cache.set(cache_key, serializer.data, 60 * 60 * 15)
+                cache.set(cache_key, serializer.data, 60 * 15)
                 return Response(
                     serializer.data,
                     status=status.HTTP_200_OK
