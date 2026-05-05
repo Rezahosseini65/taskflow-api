@@ -175,7 +175,7 @@ class MemberBoardListView(APIView):
                 status=status.HTTP_200_OK
             )
         try:
-            boards = Board.objects.filter(members=request.user) \
+            boards = Board.objects.filter(members=request.user, is_active=True) \
                 .exclude(owner=request.user) \
                 .select_related("owner") \
                 .only('id', 'name', 'slug', 'created_at', 'owner__id', 'owner__email')
