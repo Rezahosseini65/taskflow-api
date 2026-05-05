@@ -90,7 +90,9 @@ class OwnerBoardListView(APIView):
             #connection.force_debug_cursor = True
             #reset_queries()
             if boards is None:
-                boards = Board.objects.filter(owner=request.user).select_related('owner').distinct()
+                boards = Board.objects.filter(owner=request.user, is_active=True)\
+                         .select_related('owner') \
+                         .only('id', 'name', 'slug', 'created_at', 'owner__id', 'owner__email')
                 #boards_list = list(boards)
                 serializer = BoardListSerializer(boards, many=True)
                 # print(f"تعداد کویری‌های اجرا شده برای این ویو: {len(connection.queries)}")
