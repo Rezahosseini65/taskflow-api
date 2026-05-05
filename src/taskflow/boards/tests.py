@@ -238,7 +238,7 @@ class OwnerBoardListViewTest(APITestCase):
                 mock_cache_set.call_args[0][0],
          f"user_owner_boards_{self.owner1.id}"
             )
-            self.assertEqual(mock_cache_set.call_args[0][2], 60 * 60 * 24)
+            self.assertEqual(mock_cache_set.call_args[0][2], 60 * 15)
 
             self.assertEqual(response.status_code, status.HTTP_200_OK)
 
@@ -1038,7 +1038,7 @@ class MemberBoardDetailViewTests(APITestCase):
 
         expected_fields = {
             'id', 'name', 'slug', 'description',
-            'created_at', 'owner', 'members'
+            'created_at', 'owner', 'members', 'updated_at'
         }
 
         self.assertEqual(set(response.data.keys()), expected_fields)
