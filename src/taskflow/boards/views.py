@@ -223,11 +223,11 @@ class MemberBoardDetailView(APIView):
 
             board = get_object_or_404(
                 Board.objects.filter(
-                    Q(members=request.user) & ~Q(owner=request.user)
+                    Q(members=request.user) & ~Q(owner=request.user) & Q(is_active=True)
                 ).select_related(
                     'owner'
                 ).only(
-                    'id', 'name', 'slug', 'description', 'created_at', 'updated_at',  # فیلدهای Board
+                    'id', 'name', 'slug', 'description', 'created_at', 'updated_at',
                     'owner__id', 'owner__email'
                 ).prefetch_related(
                     Prefetch(
