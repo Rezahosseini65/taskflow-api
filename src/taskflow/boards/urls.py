@@ -4,6 +4,7 @@ from .views import (
     BoardCreateView,
     OwnerBoardListView,
     OwnerBoardDetailView,
+    OwnerBoardUpdateView,
     MemberBoardListView,
     MemberBoardDetailView
 )
@@ -23,6 +24,11 @@ urlpatterns = [
         'owned/detail/<int:pk>/',
         OwnerBoardDetailView.as_view(),
         name='board-owned-detail'
+    ),
+    path(
+        'owned/update/<int:pk>/',
+        OwnerBoardUpdateView.as_view(),
+        name='board-owned-update'
     ),
     path(
         'member/list/',

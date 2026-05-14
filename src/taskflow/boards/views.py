@@ -18,7 +18,8 @@ from .paginations import StandardResultsSetPagination
 from .serializers import (
     BoardCreateSerializer,
     BoardListSerializer,
-    BoardDetailSerializer
+    BoardDetailSerializer,
+    BoardUpdateSerializer
 )
 from taskflow.accounts.models import CustomUser
 
@@ -77,7 +78,7 @@ class BoardCreateView(APIView):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-from django.db import connection, reset_queries
+#from django.db import connection, reset_queries
 class OwnerBoardListView(APIView):
 
     permission_classes = [IsAuthenticated]
@@ -264,3 +265,126 @@ class MemberBoardDetailView(APIView):
                 {"detail": "An internal server error occurred."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class OwnerBoardUpdateView(APIView):
+    """
+        API view for board owners to update their boards.
+
+        Features:
+        - Update board name and description
+        - Add members to board
+        - Remove members from board
+        - Optimized queries with select_related and prefetch_related
+        - Atomic transaction for data consistency
+        - Cache invalidation on update
+        """
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def patch(self, request, pk):
+        user_id = request.user.id
+
+        try:
+            # Optimized query with selective field loading
+            board = Board.objects.filter(owner_id=user_id, pk=pk) \
+                .only('id', 'name', 'slug', 'description', 'is_active',
+                      'owner_id', 'created_at', 'updated_at') \
+                .select_related('owner') \
+                .only('id', 'name', 'slug', 'description', 'is_active',
+                      'owner_id', 'created_at', 'updated_at',
+                      'owner__id', 'owner__email') \
+                .prefetch_related(
+                Prefetch('members',
+                         queryset=CustomUser.objects.only('id', 'email'))
+            ) \
+                .select_for_update() \
+                .get()
+
+        except Board.DoesNotExist:
+            return Response(
+                {"detail": "Board not found or no permission."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Validate request data
+        serializer = BoardUpdateSerializer(
+            data=request.data,
+            context={'board': board}
+        )
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        # Update board fields
+        update_fields = []
+        if 'name' in data:
+            board.name = data['name']
+            update_fields.append('name')
+        if 'description' in data:
+            board.description = data['description']
+            update_fields.append('description')
+        if update_fields:
+            update_fields.append('updated_at')
+            board.save(update_fields=update_fields)
+
+        # Fetch users for member operations (single query)
+        all_emails = set(data.get('members_to_add', []) + data.get('members_to_remove', []))
+        email_to_user = {}
+
+        if all_emails:
+            users = CustomUser.objects.filter(
+                email__in=all_emails
+            ).only('id', 'email')
+            email_to_user = {user.email: user for user in users}
+
+            # Validate all emails exist
+            missing_emails = all_emails - set(email_to_user.keys())
+            if missing_emails:
+                return Response(
+                    {"detail": f"User(s) not found: {', '.join(missing_emails)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Add new members
+        if data.get('members_to_add'):
+            users_to_add = [
+                email_to_user[email] for email in data['members_to_add']
+                if email in email_to_user
+            ]
+            if users_to_add:
+                board.members.add(*users_to_add)
+
+        # Remove members
+        if data.get('members_to_remove'):
+            users_to_remove = [
+                email_to_user[email] for email in data['members_to_remove']
+                if email in email_to_user
+            ]
+            if users_to_remove:
+                board.members.remove(*users_to_remove)
+
+        # Invalidate cache
+        cache.delete(f'member_board_detail_{pk}_user_{user_id}')
+
+        # Build response using cached prefetched data
+        members_data = [
+            {'id': member.id, 'email': member.email}
+            for member in getattr(board, '_prefetched_objects_cache', {}).get('members', [])
+        ]
+
+        response_data = {
+            'id': board.id,
+            'name': board.name,
+            'slug': board.slug,
+            'description': board.description,
+            'is_active': board.is_active,
+            'owner': {
+                'id': board.owner.id,
+                'email': board.owner.email
+            },
+            'members': members_data,
+            'created_at': board.created_at,
+            'updated_at': board.updated_at,
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
