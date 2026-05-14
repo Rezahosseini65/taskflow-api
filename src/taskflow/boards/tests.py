@@ -1151,3 +1151,374 @@ class MemberBoardDetailViewTests(APITestCase):
         """پاک‌سازی بعد از هر تست"""
         cache.clear()
         super().tearDown()
+
+
+class OwnerBoardUpdateViewTest(APITestCase):
+    """
+    Test suite for OwnerBoardUpdateView.
+
+    Tests cover:
+    - Successful board updates (name, description, members)
+    - Validation errors (duplicate name, long description, empty name)
+    - Member management (add, remove, add/remove together)
+    - Edge cases (non-existent users, duplicate emails, cache invalidation)
+    - Permission checks (unauthenticated, non-owner)
+    - Concurrent operation validations
+    """
+
+    def setUp(self):
+        """Initialize test data with owner, members, and a test board."""
+        cache.clear()
+
+        # Create test users
+        self.owner = CustomUser.objects.create_user(
+            email='owner@test.com',
+            password='testPass123'
+        )
+        self.member1 = CustomUser.objects.create_user(
+            email='member1@test.com',
+            password='testPass123'
+        )
+        self.member2 = CustomUser.objects.create_user(
+            email='member2@test.com',
+            password='testPass123'
+        )
+        self.non_member = CustomUser.objects.create_user(
+            email='nonmember@test.com',
+            password='testPass123'
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email='other@test.com',
+            password='testPass123'
+        )
+
+        # Create test board owned by owner
+        self.board = Board.objects.create(
+            name='Test Board',
+            slug='test-board',
+            description='Test Description',
+            owner=self.owner
+        )
+
+        # Add initial members
+        self.board.members.add(self.member1, self.member2)
+
+        # API endpoint URL
+        self.url = reverse('board-owned-update', kwargs={'pk': self.board.pk})
+
+    def authenticate(self, user):
+        """Helper method to authenticate a user."""
+        self.client.force_authenticate(user=user)
+
+    # ==================== Successful Update Tests ====================
+
+    def test_successful_update_board_name_and_description(self):
+        """Test successfully updating both board name and description."""
+        self.authenticate(self.owner)
+
+        data = {
+            'name': 'Updated Board Name',
+            'description': 'Updated Description'
+        }
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['name'], 'Updated Board Name')
+        self.assertEqual(response.data['description'], 'Updated Description')
+
+        self.board.refresh_from_db()
+        self.assertEqual(self.board.name, 'Updated Board Name')
+        self.assertEqual(self.board.description, 'Updated Description')
+
+    def test_successful_update_only_name(self):
+        """Test updating only the board name."""
+        self.authenticate(self.owner)
+
+        data = {'name': 'New Name Only'}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['name'], 'New Name Only')
+        self.assertEqual(response.data['description'], 'Test Description')
+
+        self.board.refresh_from_db()
+        self.assertEqual(self.board.name, 'New Name Only')
+        self.assertEqual(self.board.description, 'Test Description')
+
+    def test_successful_update_only_description(self):
+        """Test updating only the board description."""
+        self.authenticate(self.owner)
+
+        data = {'description': 'New Description Only'}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['description'], 'New Description Only')
+
+        self.board.refresh_from_db()
+        self.assertEqual(self.board.description, 'New Description Only')
+
+    # ==================== Member Management Tests ====================
+
+    def test_add_members_successfully(self):
+        """Test adding new members to the board."""
+        self.authenticate(self.owner)
+
+        data = {'members_to_add': ['nonmember@test.com']}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.board.refresh_from_db()
+        self.assertTrue(self.board.members.filter(email='nonmember@test.com').exists())
+        self.assertEqual(self.board.members.count(), 3)
+
+    def test_remove_members_successfully(self):
+        """Test removing members from the board."""
+        self.authenticate(self.owner)
+
+        data = {'members_to_remove': ['member1@test.com']}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.board.refresh_from_db()
+        self.assertFalse(self.board.members.filter(email='member1@test.com').exists())
+        self.assertEqual(self.board.members.count(), 1)
+
+    def test_add_and_remove_members_together(self):
+        """Test adding and removing members in a single request."""
+        self.authenticate(self.owner)
+
+        data = {
+            'members_to_add': ['nonmember@test.com'],
+            'members_to_remove': ['member1@test.com']
+        }
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.board.refresh_from_db()
+        self.assertTrue(self.board.members.filter(email='nonmember@test.com').exists())
+        self.assertFalse(self.board.members.filter(email='member1@test.com').exists())
+        self.assertTrue(self.board.members.filter(email='member2@test.com').exists())
+
+    # ==================== Validation Error Tests ====================
+
+    def test_duplicate_board_name_for_same_owner(self):
+        """Test duplicate board name validation for same owner."""
+        self.authenticate(self.owner)
+
+        # Create another board with the same name
+        Board.objects.create(
+            name='Existing Board',
+            description='Another board',
+            owner=self.owner
+        )
+
+        data = {'name': 'Existing Board'}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+        self.assertIn('already have a board with this name', str(response.data))
+
+    def test_same_name_allowed_for_different_owner(self):
+        """Test same board name is allowed for different owners."""
+        self.authenticate(self.owner)
+
+        # Create board with same name by different owner
+        Board.objects.create(
+            name='Same Name',
+            description='Another board',
+            owner=self.other_user
+        )
+
+        data = {'name': 'Same Name'}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.board.refresh_from_db()
+        self.assertEqual(self.board.name, 'Same Name')
+
+    def test_cannot_remove_board_owner(self):
+        """Test that board owner cannot be removed from members."""
+        self.authenticate(self.owner)
+
+        data = {'members_to_remove': [self.owner.email]}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('members_to_remove', response.data)
+        self.assertIn('Cannot remove board owner', str(response.data))
+
+    def test_cannot_add_owner_as_member(self):
+        """Test that board owner cannot be added as member (already member)."""
+        self.authenticate(self.owner)
+
+        data = {'members_to_add': [self.owner.email]}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('members_to_add', response.data)
+        self.assertIn('already a member by default', str(response.data))
+
+    def test_cannot_add_and_remove_same_user(self):
+        """Test cannot add and remove the same user in one request."""
+        self.authenticate(self.owner)
+
+        data = {
+            'members_to_add': ['member1@test.com'],
+            'members_to_remove': ['member1@test.com']
+        }
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Cannot add and remove the same user', str(response.data))
+
+    def test_add_already_member_user(self):
+        """Test adding a user who is already a board member."""
+        self.authenticate(self.owner)
+
+        data = {'members_to_add': ['member1@test.com']}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('members_to_add', response.data)
+        self.assertIn('already members', str(response.data))
+
+    def test_remove_non_member_user(self):
+        """Test removing a user who is not a board member."""
+        self.authenticate(self.owner)
+
+        data = {'members_to_remove': ['nonmember@test.com']}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('members_to_remove', response.data)
+        self.assertIn('not members', str(response.data))
+
+    def test_add_nonexistent_user(self):
+        """Test adding a user that doesn't exist in the system."""
+        self.authenticate(self.owner)
+
+        data = {'members_to_add': ['nonexistent@test.com']}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('User(s) not found', str(response.data))
+
+    def test_description_too_long(self):
+        """Test validation for description exceeding 500 characters."""
+        self.authenticate(self.owner)
+
+        data = {'description': 'a' * 501}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('description', response.data)
+        self.assertIn('500 characters', str(response.data))
+
+    def test_empty_name_not_allowed(self):
+        """Test that empty board name is not allowed."""
+        self.authenticate(self.owner)
+
+        data = {'name': ''}
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+
+    # ==================== Permission Tests ====================
+
+    def test_unauthenticated_user(self):
+        """Test unauthenticated user cannot update board."""
+        response = self.client.patch(self.url, {'name': 'New Name'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_non_owner_cannot_update(self):
+        """Test non-owner user cannot update the board."""
+        self.authenticate(self.member1)
+
+        response = self.client.patch(self.url, {'name': 'Hacked Name'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn('Board not found or no permission', str(response.data))
+
+    def test_board_not_found(self):
+        """Test request for non-existent board returns 404."""
+        self.authenticate(self.owner)
+
+        url = reverse('board-owned-update', kwargs={'pk': 99999})
+        response = self.client.patch(url, {'name': 'New Name'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ==================== Cache Tests ====================
+
+    def test_cache_invalidated_after_update(self):
+        """Test that cache is properly invalidated after board update."""
+        self.authenticate(self.owner)
+
+        # Set cache value
+        cache_key = f'member_board_detail_{self.board.pk}_user_{self.owner.pk}'
+        cache.set(cache_key, {'test': 'data'})
+
+        # Update board
+        response = self.client.patch(self.url, {'name': 'Updated Name'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Verify cache was cleared
+        self.assertIsNone(cache.get(cache_key))
+
+    # ==================== Edge Cases ====================
+
+    def test_update_with_duplicate_emails_in_add(self):
+        """Test duplicate emails in members_to_add are handled correctly."""
+        self.authenticate(self.owner)
+
+        data = {
+            'members_to_add': ['nonmember@test.com', 'nonmember@test.com']
+        }
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Verify user was added only once
+        self.board.refresh_from_db()
+        members_count = self.board.members.filter(email='nonmember@test.com').count()
+        self.assertEqual(members_count, 1)
+
+    def test_update_with_duplicate_emails_in_remove(self):
+        """Test duplicate emails in members_to_remove are handled correctly."""
+        self.authenticate(self.owner)
+
+        data = {
+            'members_to_remove': ['member1@test.com', 'member1@test.com']
+        }
+
+        response = self.client.patch(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.board.refresh_from_db()
+        self.assertFalse(self.board.members.filter(email='member1@test.com').exists())
