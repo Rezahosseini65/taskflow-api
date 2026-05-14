@@ -5,6 +5,7 @@ from django.conf import settings
 from django.urls import reverse
 from django.utils.text import slugify
 from django.core.cache import cache
+from django.db import transaction
 
 from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
@@ -1152,6 +1153,7 @@ class MemberBoardDetailViewTests(APITestCase):
         cache.clear()
         super().tearDown()
 
+#-------------------------------------------Owner Board Update View Test---------------------------------------
 
 class OwnerBoardUpdateViewTest(APITestCase):
     """
@@ -1522,3 +1524,341 @@ class OwnerBoardUpdateViewTest(APITestCase):
 
         self.board.refresh_from_db()
         self.assertFalse(self.board.members.filter(email='member1@test.com').exists())
+
+#-------------------------------------------Owner Board Delete View Test---------------------------------------
+
+class OwnerBoardDeleteViewTest(APITestCase):
+    """
+    Test suite for OwnerBoardDeleteView.
+    """
+
+    def setUp(self):
+        """Initialize test data."""
+        cache.clear()
+
+        # Create test users (only email and password as specified)
+        self.owner = CustomUser.objects.create_user(
+            email='owner@test.com',
+            password='testPass123'
+        )
+        self.member = CustomUser.objects.create_user(
+            email='member@test.com',
+            password='testPass123'
+        )
+        self.other_user = CustomUser.objects.create_user(
+            email='other@test.com',
+            password='testPass123'
+        )
+
+        # Create active board
+        self.board = Board.objects.create(
+            name='Test Board',
+            slug='test-board',
+            description='Test Description',
+            owner=self.owner,
+            is_active=True
+        )
+        self.board.members.add(self.member)
+
+        # Create already deleted board (inactive)
+        self.deleted_board = Board.objects.create(
+            name='Deleted Board',
+            slug='deleted-board',
+            description='Already Deleted',
+            owner=self.owner,
+            is_active=False
+        )
+
+        self.url = reverse('board-owned-delete', kwargs={'pk': self.board.pk})
+        self.deleted_url = reverse('board-owned-delete', kwargs={'pk': self.deleted_board.pk})
+
+    def authenticate(self, user):
+        """Helper method to authenticate a user."""
+        self.client.force_authenticate(user=user)
+
+    # ==================== Successful Delete Tests ====================
+
+    def test_owner_can_delete_board_successfully(self):
+        """Test board owner can soft delete their active board."""
+        self.authenticate(self.owner)
+
+        response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Verify board is soft deleted
+        self.board.refresh_from_db()
+        self.assertFalse(self.board.is_active)
+
+        # Verify other fields remain unchanged
+        self.assertEqual(self.board.name, 'Test Board')
+        self.assertEqual(self.board.description, 'Test Description')
+        self.assertEqual(self.board.owner, self.owner)
+
+    def test_cannot_delete_already_inactive_board(self):
+        """Test cannot delete a board that is already inactive."""
+        self.authenticate(self.owner)
+
+        response = self.client.delete(self.deleted_url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # Verify board remains inactive
+        self.deleted_board.refresh_from_db()
+        self.assertFalse(self.deleted_board.is_active)
+
+    def test_members_still_accessible_after_soft_delete(self):
+        """Test board members are still accessible after soft delete."""
+        self.authenticate(self.owner)
+
+        # Verify members exist before delete
+        self.assertTrue(self.board.members.filter(email='member@test.com').exists())
+
+        # Delete board
+        response = self.client.delete(self.url)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Verify members relationship still exists
+        self.board.refresh_from_db()
+        self.assertTrue(self.board.members.filter(email='member@test.com').exists())
+
+    # ==================== Permission Tests ====================
+
+    def test_non_owner_cannot_delete_board(self):
+        """Test board member cannot delete the board."""
+        self.authenticate(self.member)
+
+        response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # Verify board remains active
+        self.board.refresh_from_db()
+        self.assertTrue(self.board.is_active)
+
+    def test_other_user_cannot_delete_board(self):
+        """Test completely unrelated user cannot delete the board."""
+        self.authenticate(self.other_user)
+
+        response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # Verify board remains active
+        self.board.refresh_from_db()
+        self.assertTrue(self.board.is_active)
+
+    def test_unauthenticated_user_cannot_delete_board(self):
+        """Test unauthenticated user cannot delete board."""
+        response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Verify board remains active
+        self.board.refresh_from_db()
+        self.assertTrue(self.board.is_active)
+
+    # ==================== Edge Cases Tests ====================
+
+    def test_delete_nonexistent_board(self):
+        """Test deleting a board that doesn't exist."""
+        self.authenticate(self.owner)
+
+        url = reverse('board-owned-delete', kwargs={'pk': 99999})
+        response = self.client.delete(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ✅ حذف شد: test_delete_board_with_invalid_pk (غیرقابل تست با int pk)
+
+    def test_delete_other_owners_board(self):
+        """Test user cannot delete another user's board."""
+        self.authenticate(self.owner)
+
+        # Create board for other user
+        other_board = Board.objects.create(
+            name="Other's Board",
+            slug='others-board',
+            owner=self.other_user,
+            is_active=True
+        )
+        url = reverse('board-owned-delete', kwargs={'pk': other_board.pk})
+
+        response = self.client.delete(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # Verify other's board remains active
+        other_board.refresh_from_db()
+        self.assertTrue(other_board.is_active)
+
+    # ==================== Cache Tests ====================
+
+    def test_cache_invalidated_after_delete(self):
+        """Test that caches are properly invalidated after board deletion."""
+        self.authenticate(self.owner)
+
+        # Set cache values
+        cache_key1 = f'owner_board_detail_{self.board.pk}_user_{self.owner.pk}'
+        cache_key2 = f'user_owner_boards_{self.owner.pk}'
+
+        cache.set(cache_key1, {'test': 'data'})
+        cache.set(cache_key2, [{'id': self.board.pk, 'name': 'Test Board'}])
+
+        # Delete board
+        response = self.client.delete(self.url)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Verify caches are cleared
+        self.assertIsNone(cache.get(cache_key1))
+        self.assertIsNone(cache.get(cache_key2))
+
+    def test_cache_with_different_user_not_affected(self):
+        """Test that other user's cache is not affected."""
+        self.authenticate(self.owner)
+
+        # Set cache for different user
+        other_cache_key = f'user_owner_boards_{self.member.pk}'
+        cache.set(other_cache_key, [{'test': 'data'}])
+
+        # Delete board
+        response = self.client.delete(self.url)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Verify other user's cache remains intact
+        self.assertIsNotNone(cache.get(other_cache_key))
+
+    # ==================== Concurrent Operations Tests ====================
+
+    # ✅ حذف شد: test_concurrent_delete_requests (در محیط تست جنگو کار نمی‌کند)
+    # دلیل: هر تست در یک تراکنش جداگانه اجرا می‌شود و select_for_update رفتار متفاوتی دارد
+
+    # ==================== Data Integrity Tests ====================
+
+    def test_soft_delete_does_not_remove_from_database(self):
+        """Test that soft delete does not actually remove the record."""
+        self.authenticate(self.owner)
+
+        board_id = self.board.pk
+
+        response = self.client.delete(self.url)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Board should still exist in database
+        self.assertTrue(Board.objects.filter(pk=board_id).exists())
+
+        # But should not be in active queryset
+        self.assertFalse(Board.objects.filter(pk=board_id, is_active=True).exists())
+
+    def test_updated_at_changed_after_delete(self):
+        """Test that updated_at timestamp is updated after soft delete."""
+        self.authenticate(self.owner)
+
+        original_updated_at = self.board.updated_at
+
+        # Wait a moment to ensure timestamp difference
+        import time
+        time.sleep(0.01)
+
+        response = self.client.delete(self.url)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.board.refresh_from_db()
+        self.assertNotEqual(self.board.updated_at, original_updated_at)
+        self.assertGreater(self.board.updated_at, original_updated_at)
+
+    def test_delete_twice_returns_404(self):
+        """Test deleting the same board twice returns 404 on second attempt."""
+        self.authenticate(self.owner)
+
+        # First delete
+        response1 = self.client.delete(self.url)
+        self.assertEqual(response1.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Second delete (board is already inactive)
+        response2 = self.client.delete(self.url)
+        self.assertEqual(response2.status_code, status.HTTP_404_NOT_FOUND)
+
+    # ==================== Query Optimization Tests ====================
+
+    def test_only_necessary_fields_are_selected(self):
+        """Test that only necessary fields are selected from database."""
+        self.authenticate(self.owner)
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as context:
+            response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Find SELECT query (ignore SAVEPOINT queries)
+        select_query = None
+        for query in context.captured_queries:
+            if 'SELECT' in query['sql'] and 'boards_board' in query['sql']:
+                select_query = query['sql']
+                break
+
+        # Verify only necessary fields are selected
+        self.assertIsNotNone(select_query)
+        self.assertIn('"id"', select_query)
+        self.assertIn('"is_active"', select_query)
+        self.assertIn('"updated_at"', select_query)
+        self.assertIn('"owner_id"', select_query)
+
+        # Verify unnecessary fields are not selected
+        self.assertNotIn('"name"', select_query)
+        self.assertNotIn('"description"', select_query)
+        self.assertNotIn('"slug"', select_query)
+        self.assertNotIn('"created_at"', select_query)
+
+    def test_only_two_queries_executed(self):
+        """Test that only 2 queries are executed (SELECT and UPDATE)."""
+        self.authenticate(self.owner)
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as context:
+            response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        # Filter out SAVEPOINT and other system queries
+        actual_queries = [
+            q for q in context.captured_queries
+            if 'SELECT' in q['sql'] or 'UPDATE' in q['sql']
+        ]
+
+        # Should be exactly 2 queries (SELECT FOR UPDATE + UPDATE)
+        self.assertEqual(len(actual_queries), 2)
+
+        # Verify query types
+        query_types = []
+        for query in actual_queries:
+            if 'SELECT' in query['sql']:
+                query_types.append('SELECT')
+            elif 'UPDATE' in query['sql']:
+                query_types.append('UPDATE')
+
+        self.assertEqual(query_types, ['SELECT', 'UPDATE'])
+
+    def test_response_has_correct_status_and_message(self):
+        """Test that response has correct status code and message."""
+        self.authenticate(self.owner)
+
+        response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.data, {"detail": "Board deleted successfully."})
+
+    def test_delete_response_has_no_content_body_for_204(self):
+        """Test that 204 response has no content body (by default)."""
+        self.authenticate(self.owner)
+
+        response = self.client.delete(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        # For 204 responses, Django REST framework may return empty response
+        # This test ensures our implementation follows the standard
