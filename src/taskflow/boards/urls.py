@@ -5,6 +5,7 @@ from .views import (
     OwnerBoardListView,
     OwnerBoardDetailView,
     OwnerBoardUpdateView,
+    OwnerBoardDeleteView,
     MemberBoardListView,
     MemberBoardDetailView
 )
@@ -31,6 +32,11 @@ urlpatterns = [
         name='board-owned-update'
     ),
     path(
+      'owned/delete/<int:pk>/',
+        OwnerBoardDeleteView.as_view(),
+        name='board-owned-delete'
+    ),
+    path(
         'member/list/',
         MemberBoardListView.as_view(),
         name='board-member-list'
@@ -39,5 +45,5 @@ urlpatterns = [
         'member/detail/<int:pk>/',
         MemberBoardDetailView.as_view(),
         name='board-member-detail'
-    )
+    ),
 ]

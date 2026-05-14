@@ -388,3 +388,39 @@ class OwnerBoardUpdateView(APIView):
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
+
+
+class OwnerBoardDeleteView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def delete(self, request, pk):
+        user_id = request.user.id
+
+        try:
+            board = Board.objects.filter(
+                pk=pk,
+                owner_id=user_id,
+                is_active=True
+            )\
+            .only('id', 'is_active', 'updated_at', 'owner_id')\
+            .select_for_update()\
+            .get()
+
+        except Board.DoesNotExist:
+            return Response(
+                {"detail": "Board not found or no permission."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        board.is_active = False
+        board.save(update_fields=['is_active', 'updated_at'])
+
+        cache.delete(f'owner_board_detail_{board.pk}_user_{user_id}')
+        cache.delete(f'user_owner_boards_{request.user.id}')
+
+        return Response(
+            {"detail": "Board deleted successfully."},
+            status=status.HTTP_204_NO_CONTENT
+        )
