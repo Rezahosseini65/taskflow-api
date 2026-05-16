@@ -8,6 +8,8 @@ from django.contrib.auth.models import (
     UserManager
 )
 
+from .validators import phone_number_validator
+
 # Create your models here.
 
 
@@ -52,6 +54,58 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         _('email'),
         unique=True
     )
+    first_name = models.CharField(
+        _('first name'),
+        max_length=64,
+        null=True,
+        blank=True
+    )
+    last_name = models.CharField(
+        _('last name'),
+        max_length=64,
+        null=True,
+        blank=True
+    )
+    display_name = models.CharField(
+        _('display name'),
+        max_length=150,
+        null=True,
+        blank=True,
+        help_text=_('Name shown to other team members')
+    )
+    phone_number = models.CharField(
+        _('phone number'),
+        max_length=13,
+        validators=[phone_number_validator],
+        null=True,
+        blank=True
+    )
+    avatar = models.ImageField(
+        _('avatar'),
+        upload_to='avatars/',
+        blank=True,
+        null=True
+    )
+
+    invited_by = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='invited_users',
+        verbose_name=_('invited by')
+    )
+    invitation_accepted_at = models.DateTimeField(
+        _('invitation accepted at'),
+        null=True,
+        blank=True
+    )
+
+    email_notifications_enabled = models.BooleanField(
+        _('email notifications'),
+        default=True
+    )
+
     is_staff = models.BooleanField(
         _('staff status'),
         default=True,
@@ -65,7 +119,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             "Unselect this instead of deleting accounts."
         ),
     )
+
     date_joined = models.DateTimeField(_("date joined"), default=timezone.now)
+    last_activity = models.DateTimeField(_('last activity'), default=timezone.now)
+    is_online = models.BooleanField(_('online status'), default=False)
 
     objects = CustomUserManager()
 
