@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class BoardCreateView(APIView):
-
+    authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     @transaction.atomic
@@ -393,7 +393,7 @@ class OwnerBoardUpdateView(APIView):
 
 
 class OwnerBoardDeleteView(APIView):
-    
+
     authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
