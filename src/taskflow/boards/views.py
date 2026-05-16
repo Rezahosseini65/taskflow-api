@@ -22,6 +22,7 @@ from .serializers import (
     BoardUpdateSerializer
 )
 from taskflow.accounts.models import CustomUser
+from taskflow.accounts.authentication import CookieJWTAuthentication
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ class BoardCreateView(APIView):
 
 #from django.db import connection, reset_queries
 class OwnerBoardListView(APIView):
-
+    authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -126,7 +127,7 @@ class OwnerBoardListView(APIView):
 
 
 class OwnerBoardDetailView(APIView):
-
+    authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_cache_key(self, user_id, board_pk):
@@ -160,7 +161,7 @@ class OwnerBoardDetailView(APIView):
 
 
 class MemberBoardListView(APIView):
-
+    authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_cache_key(self, user_id):
@@ -205,7 +206,7 @@ class MemberBoardListView(APIView):
 
 
 class MemberBoardDetailView(APIView):
-
+    authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get_cache_key(self, user_id:int, board_pk:int)-> str:
@@ -279,6 +280,7 @@ class OwnerBoardUpdateView(APIView):
         - Atomic transaction for data consistency
         - Cache invalidation on update
         """
+    authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     @transaction.atomic
@@ -391,7 +393,8 @@ class OwnerBoardUpdateView(APIView):
 
 
 class OwnerBoardDeleteView(APIView):
-
+    
+    authentication_classes = [CookieJWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     @transaction.atomic
