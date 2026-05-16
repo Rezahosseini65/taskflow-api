@@ -6,7 +6,7 @@ from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .serializers import UserRegisterSerializer, UserLoginSerializer
@@ -29,6 +29,8 @@ class UserRegisterView(APIView):
     The entire process is wrapped in a database transaction to ensure atomicity.
     """
     throttle_classes = [UserRegisterThrottle]
+    authentication_classes = []
+
     def post(self, request):
 
         serializer = UserRegisterSerializer(data=request.data)
@@ -69,6 +71,7 @@ class UserRegisterView(APIView):
 class UserLoginView(APIView):
     #TODO: UserLoginThrottle will be enabled later
     #throttle_classes = [UserLoginThrottle]
+    authentication_classes = []
     def post(self, request):
 
         serializer = UserLoginSerializer(data=request.data)
@@ -108,7 +111,8 @@ class RefreshAccessTokenView(APIView):
     new token set as an HTTP-only cookie. If the refresh token is missing
     or invalid, it returns an appropriate error response.
     """
-    permission_classes = [IsAuthenticated]
+    authentication_classes = []
+    permission_classes = [AllowAny]
     def post(self, request):
         refresh_token = request.COOKIES.get('refresh_token')
         if refresh_token is None:
