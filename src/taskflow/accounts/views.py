@@ -6,12 +6,13 @@ from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .serializers import UserRegisterSerializer, UserLoginSerializer
 from .models import CustomUser
 from .throttles import UserRegisterThrottle, UserLoginThrottle
+from .authentication import CookieJWTAuthentication
 from taskflow.utils.services import TokenCookieManager, generate_access_refresh_tokens
 
 logger = logging.getLogger(__name__)
@@ -142,3 +143,19 @@ class RefreshAccessTokenView(APIView):
                     {"detail": f"An error occurred: {str(e)}"},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
+
+
+class UserLogoutView(APIView):
+
+    authentication_classes = [CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        response = Response (
+            {"detail": "Logout successful"},
+            status=status.HTTP_200_OK
+        )
+
+        TokenCookieManager.delete_tokens_cookies(response)
+
+        return response
