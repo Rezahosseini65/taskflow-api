@@ -5,6 +5,7 @@ from .views import (
     UserLoginView,
     RefreshAccessTokenView,
     UserLogoutView,
+    UserUpdateView
 )
 
 
@@ -18,13 +19,19 @@ urlpatterns = [
         name='user-login'
     ),
     path(
-        'token/refresh/',
-        RefreshAccessTokenView.as_view(),
-        name='token_refresh'
-    ),
-    path(
         'logout/',
         UserLogoutView.as_view(),
         name='user-logout'
     ),
+    path(
+        'update/',
+        UserUpdateView.as_view(),
+        name='user-update'
+    ),
+    path(
+        'token/refresh/',
+        RefreshAccessTokenView.as_view(),
+        name='token_refresh'
+    ),
+
 ]

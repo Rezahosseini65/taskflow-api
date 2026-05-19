@@ -4,7 +4,7 @@ from django.utils.translation import gettext_lazy as _
 
 from rest_framework import serializers
 
-from .validators import validate_strong_password
+from .validators import validate_strong_password, phone_number_validator
 from .models import CustomUser
 
 
@@ -69,3 +69,53 @@ class UserLoginSerializer(serializers.Serializer):
 
         attrs["user"] = user
         return attrs
+
+
+class UserReadSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = CustomUser
+        fields = (
+            'email', 'first_name', 'last_name', 'display_name',
+            'avatar', 'phone_number', 'email_notifications_enabled', 'date_joined'
+        )
+
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = (
+            'first_name', 'last_name', 'display_name',
+            'avatar', 'phone_number', 'email_notifications_enabled'
+        )
+        extra_kwargs = {
+            'first_name': {'required': False, 'allow_blank': False},
+            'last_name': {'required': False, 'allow_blank': False},
+            'display_name': {'required': False, 'allow_blank': False},
+            'phone_number': {
+                'required': False,
+                'allow_blank': False,
+                'validators': [phone_number_validator]
+            },
+            'email_notifications_enabled': {'required': False},
+            'avatar': {'required': False},
+        }
+
+    def update(self, instance, validated_data):
+
+        updated_fields = []
+
+        for field, value in validated_data.items():
+            if getattr(instance, field) != value:
+                setattr(instance, field, value)
+                updated_fields.append(field)
+
+        if updated_fields:
+            instance.save(update_fields=updated_fields)
+        else:
+            pass
+
+        return instance
+
+
+

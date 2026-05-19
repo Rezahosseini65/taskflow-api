@@ -9,11 +9,16 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .serializers import UserRegisterSerializer, UserLoginSerializer
 from .models import CustomUser
 from .throttles import UserRegisterThrottle, UserLoginThrottle
 from .authentication import CookieJWTAuthentication
 from taskflow.utils.services import TokenCookieManager, generate_access_refresh_tokens
+from .serializers import (
+    UserRegisterSerializer,
+    UserLoginSerializer,
+    UserUpdateSerializer,
+    UserReadSerializer
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,3 +164,40 @@ class UserLogoutView(APIView):
         TokenCookieManager.delete_tokens_cookies(response)
 
         return response
+
+
+class UserUpdateView(APIView):
+
+    authentication_classes = [CookieJWTAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        serializer = UserReadSerializer(user)
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK
+        )
+
+    def patch(self, request):
+        user = request.user
+        serializer = UserUpdateSerializer(
+            user,
+            data=request.data,
+            partial=True
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                serializer.data,
+                status=status.HTTP_200_OK
+            )
+
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+
