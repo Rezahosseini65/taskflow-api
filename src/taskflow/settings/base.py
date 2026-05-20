@@ -24,6 +24,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOCAL_APPS = [
     'taskflow.accounts',
     'taskflow.boards',
+    'taskflow.companies',
 ]
 
 THIRD_PARTY_APPS = [
