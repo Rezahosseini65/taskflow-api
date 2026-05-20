@@ -7,8 +7,10 @@ from drf_spectacular.views import SpectacularSwaggerView, SpectacularAPIView
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('__debug__/', include("debug_toolbar.urls")),
+
     path('api/users/', include('taskflow.accounts.urls'), name='register-user'),
     path('api/boards/', include('taskflow.boards.urls'), name='create-board'),
+    path('api/companies/', include('taskflow.companies.urls'), name='companies'),
 
     path('api/schema/swagger-ui/', SpectacularSwaggerView.as_view(url_name='api-schema'), name='swagger-ui'),
     path('api/schema/', SpectacularAPIView.as_view(), name='api-schema'),
