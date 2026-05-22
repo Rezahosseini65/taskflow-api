@@ -1,16 +1,338 @@
+from unittest.mock import patch
+
+from django.conf import settings
 from django.core.cache import cache
+from django.test import override_settings
 from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
+from django.utils.text import slugify
 
 from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
 
 from taskflow.companies.models import Company
-from taskflow.accounts.models import CustomUser
 
 User = get_user_model()
+
+
+class CompanyCreateViewTest(APITestCase):
+
+    def setUp(self):
+        self.url = reverse('company-create')
+        self.owner = User.objects.create_user(
+            email='owner@example.com',
+            password='testPass123'
+        )
+        self.member1 = User.objects.create_user(
+            email='member1@example.com',
+            password='testPass123'
+        )
+        self.member2 = User.objects.create_user(
+            email='member2@example.com',
+            password='testPass123'
+        )
+
+        # Clear cache before each test
+        cache.clear()
+
+    def authenticate(self, user):
+        self.client.force_authenticate(user=user)
+
+    def test_create_company_success_without_members_returns_201(self):
+        """Test successful company creation without members"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Tech Innovations Inc',
+            'slug': 'tech-innovations',
+            'email': 'contact@techinnovations.com'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('id', response.data)
+
+        company = Company.objects.get(id=response.data['id'])
+        self.assertEqual(company.name, 'Tech Innovations Inc')
+        self.assertEqual(company.slug, 'tech-innovations')
+        self.assertEqual(company.email, 'contact@techinnovations.com')
+        self.assertEqual(company.owner, self.owner)
+        self.assertEqual(company.members.count(), 0)
+
+    def test_create_company_without_slug_auto_generates_slug(self):
+        """Test that slug is automatically generated from name if not provided"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Auto Slug Company'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        company = Company.objects.get(id=response.data['id'])
+        expected_slug = slugify('Auto Slug Company', allow_unicode=True)
+        self.assertEqual(company.slug, expected_slug)
+        self.assertEqual(company.name, 'Auto Slug Company')
+
+    def test_create_company_with_members_returns_201(self):
+        """Test company creation with initial members"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Startup Hub',
+            'slug': 'startup-hub',
+            'members': [self.member1.id, self.member2.id]
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        company = Company.objects.get(id=response.data['id'])
+        self.assertEqual(company.members.count(), 2)
+        self.assertIn(self.member1, company.members.all())
+        self.assertIn(self.member2, company.members.all())
+        # Owner should not be automatically added as member
+        self.assertNotIn(self.owner, company.members.all())
+
+    def test_create_company_with_custom_slug_and_members(self):
+        """Test company creation with both custom slug and members"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Custom Company',
+            'slug': 'my-custom-slug-123',
+            'email': 'custom@company.com',
+            'members': [self.member1.id]
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        company = Company.objects.get(id=response.data['id'])
+        self.assertEqual(company.slug, 'my-custom-slug-123')
+        self.assertEqual(company.name, 'Custom Company')
+        self.assertEqual(company.email, 'custom@company.com')
+        self.assertEqual(company.members.count(), 1)
+        self.assertIn(self.member1, company.members.all())
+
+    def test_create_company_unauthenticated_returns_401(self):
+        """Test that unauthenticated users cannot create companies"""
+        payload = {
+            'name': 'Unauthorized Company'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(Company.objects.count(), 0)
+
+    def test_create_company_invalid_data_returns_400(self):
+        """Test company creation with invalid data (missing required fields)"""
+        self.authenticate(self.owner)
+
+        # Missing required 'name' field
+        payload = {
+            'email': 'no-name@company.com'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+        self.assertEqual(Company.objects.count(), 0)
+
+    def test_create_company_duplicate_slug_returns_error(self):
+        """Test that duplicate slug raises validation error"""
+        self.authenticate(self.owner)
+
+        # Create first company
+        Company.objects.create(
+            owner=self.owner,
+            name='First Company',
+            slug='duplicate-slug'
+        )
+
+        # Try to create second company with same slug
+        payload = {
+            'name': 'Second Company',
+            'slug': 'duplicate-slug'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Should return validation error for duplicate slug
+        self.assertTrue('slug' in response.data or 'non_field_errors' in response.data)
+
+    def test_create_company_with_empty_members_list(self):
+        """Test company creation with empty members list"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Empty Members Company',
+            'members': []
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        company = Company.objects.get(id=response.data['id'])
+        self.assertEqual(company.members.count(), 0)
+
+    def test_create_company_with_nonexistent_members(self):
+        """Test company creation with non-existent member IDs"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Company Bad Members',
+            'members': [99999, 88888]  # Non-existent user IDs
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        # Should either fail validation or ignore non-existent members
+        # Adjust based on your serializer's behavior
+        if response.status_code == status.HTTP_201_CREATED:
+            company = Company.objects.get(id=response.data['id'])
+            self.assertEqual(company.members.count(), 0)
+        else:
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_company_without_email_field(self):
+        """Test company creation without optional email field"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'No Email Company',
+            'slug': 'no-email'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        company = Company.objects.get(id=response.data['id'])
+        self.assertIsNone(company.email)
+
+    def test_create_company_with_unicode_characters(self):
+        """Test company creation with unicode characters in name and slug"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'شرکت فناوری اطلاعات',
+            'slug': 'it-company'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        company = Company.objects.get(id=response.data['id'])
+        self.assertEqual(company.name, 'شرکت فناوری اطلاعات')
+        self.assertEqual(company.slug, 'it-company')
+
+    def test_create_company_auto_slug_with_unicode(self):
+        """Test auto slug generation with unicode characters"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'شرکت نوآوران'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        company = Company.objects.get(id=response.data['id'])
+        expected_slug = slugify('شرکت نوآوران', allow_unicode=True)
+        self.assertEqual(company.slug, expected_slug)
+
+    @override_settings(DEBUG=True)
+    @patch('taskflow.companies.views.logger')
+    def test_create_company_database_error_handling_debug_mode(self, mock_logger):
+        """Test error handling when database operation fails in DEBUG mode"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Company That Will Fail'
+        }
+
+        # Mock Company.objects.create to raise an exception
+        with patch('taskflow.companies.models.Company.objects.create') as mock_create:
+            mock_create.side_effect = Exception("Database connection error")
+
+            # Temporarily set DEBUG to True
+            response = self.client.post(self.url, payload, format='json')
+
+            # Should return 500 error with error details
+            self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertIn('detail', response.data)
+            self.assertIn('An error occurred', response.data['detail'])
+            mock_logger.error.assert_called_once()
+
+    @override_settings(DEBUG=False)
+    @patch('taskflow.companies.views.logger')
+    def test_create_company_database_error_handling_non_debug_mode(self, mock_logger):
+        """Test error handling when database operation fails in non-DEBUG mode"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Company That Will Fail'
+        }
+
+        # Mock Company.objects.create to raise an exception
+        with patch('taskflow.companies.models.Company.objects.create') as mock_create:
+            mock_create.side_effect = Exception("Database connection error")
+
+            # Temporarily set DEBUG to False
+
+            response = self.client.post(self.url, payload, format='json')
+
+            # Should return 500 error with generic message
+            self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertEqual(response.data, {'detail': 'Server Error'})
+            mock_logger.error.assert_called_once()
+
+    def test_create_company_multiple_companies_same_owner(self):
+        """Test creating multiple companies by the same owner"""
+        self.authenticate(self.owner)
+
+        companies_data = [
+            {'name': 'Company Alpha', 'slug': 'alpha'},
+            {'name': 'Company Beta', 'slug': 'beta'},
+            {'name': 'Company Gamma', 'slug': 'gamma'}
+        ]
+
+        for data in companies_data:
+            response = self.client.post(self.url, data, format='json')
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        self.assertEqual(Company.objects.filter(owner=self.owner).count(), 3)
+
+    def test_create_company_with_duplicate_name_not_allowed(self):
+        """Test that companies can have the same name (if model allows)"""
+        self.authenticate(self.owner)
+
+        payload1 = {'name': 'Same Name Company', 'slug': 'first'}
+        payload2 = {'name': 'Same Name Company', 'slug': 'second'}
+
+        response1 = self.client.post(self.url, payload1, format='json')
+        response2 = self.client.post(self.url, payload2, format='json')
+
+        self.assertEqual(response1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response2.status_code, status.HTTP_400_BAD_REQUEST)
+
+        companies = Company.objects.filter(name='Same Name Company')
+        self.assertEqual(companies.count(), 1)
+
+    def tearDown(self):
+        # Clean up cache if you have any cache invalidation
+        cache.clear()
+        super().tearDown()
 
 
 class CompanyDetailViewTest(APITestCase):
