@@ -4,6 +4,34 @@ from .models import Company
 from taskflow.accounts.models import CustomUser
 
 
+class CompanyCreateSerializer(serializers.ModelSerializer):
+    members = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=CustomUser.objects.all(),
+        required=False
+    )
+
+    class Meta:
+        model = Company
+        fields = (
+            'id', 'name', 'slug', 'email', 'website',
+            'description', 'logo', 'members',
+        )
+        extra_kwargs = {
+            'slug': {'required': False},
+            'description': {'required': False},
+            'email':{'required': False},
+            'website':{'required': False},
+            'logo': {'required': False},
+        }
+
+    def validate_slug(self, value):
+        if Company.objects.filter(slug=value).exists():
+            raise serializers.ValidationError("A company with this slug already exists.")
+
+        return value
+
+
 class UserSimpleSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
