@@ -8,7 +8,8 @@ class CompanyCreateSerializer(serializers.ModelSerializer):
     members = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=CustomUser.objects.all(),
-        required=False
+        required=False,
+        write_only=True
     )
 
     class Meta:
