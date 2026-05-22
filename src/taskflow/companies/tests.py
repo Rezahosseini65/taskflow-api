@@ -1,6 +1,5 @@
 from unittest.mock import patch
 
-from django.conf import settings
 from django.core.cache import cache
 from django.test import override_settings
 from django.urls import reverse
@@ -12,7 +11,7 @@ from django.utils.text import slugify
 from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
 
-from taskflow.companies.models import Company
+from taskflow.companies.models import Company, Membership
 
 User = get_user_model()
 
@@ -60,7 +59,14 @@ class CompanyCreateViewTest(APITestCase):
         self.assertEqual(company.slug, 'tech-innovations')
         self.assertEqual(company.email, 'contact@techinnovations.com')
         self.assertEqual(company.owner, self.owner)
-        self.assertEqual(company.members.count(), 0)
+
+        # بررسی membership برای owner
+        owner_membership = Membership.objects.get(user=self.owner, company=company)
+        self.assertEqual(owner_membership.role, Membership.RoleChoices.ADMIN)
+
+        # بررسی اینکه هیچ عضو دیگری وجود ندارد
+        self.assertEqual(company.members.count(), 1)  # فقط owner
+        self.assertIn(self.owner, company.members.all())
 
     def test_create_company_without_slug_auto_generates_slug(self):
         """Test that slug is automatically generated from name if not provided"""
@@ -79,6 +85,15 @@ class CompanyCreateViewTest(APITestCase):
         self.assertEqual(company.slug, expected_slug)
         self.assertEqual(company.name, 'Auto Slug Company')
 
+        # بررسی اینکه owner به عنوان ADMIN اضافه شده
+        self.assertTrue(
+            Membership.objects.filter(
+                user=self.owner,
+                company=company,
+                role=Membership.RoleChoices.ADMIN
+            ).exists()
+        )
+
     def test_create_company_with_members_returns_201(self):
         """Test company creation with initial members"""
         self.authenticate(self.owner)
@@ -94,11 +109,23 @@ class CompanyCreateViewTest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
         company = Company.objects.get(id=response.data['id'])
-        self.assertEqual(company.members.count(), 2)
+
+        # بررسی تعداد کل اعضا (owner + 2 member)
+        self.assertEqual(company.members.count(), 3)
+
+        # بررسی owner
+        self.assertIn(self.owner, company.members.all())
+        owner_membership = Membership.objects.get(user=self.owner, company=company)
+        self.assertEqual(owner_membership.role, Membership.RoleChoices.ADMIN)
+
+        # بررسی اعضای اضافه شده
         self.assertIn(self.member1, company.members.all())
+        member1_membership = Membership.objects.get(user=self.member1, company=company)
+        self.assertEqual(member1_membership.role, Membership.RoleChoices.MEMBER)
+
         self.assertIn(self.member2, company.members.all())
-        # Owner should not be automatically added as member
-        self.assertNotIn(self.owner, company.members.all())
+        member2_membership = Membership.objects.get(user=self.member2, company=company)
+        self.assertEqual(member2_membership.role, Membership.RoleChoices.MEMBER)
 
     def test_create_company_with_custom_slug_and_members(self):
         """Test company creation with both custom slug and members"""
@@ -119,8 +146,15 @@ class CompanyCreateViewTest(APITestCase):
         self.assertEqual(company.slug, 'my-custom-slug-123')
         self.assertEqual(company.name, 'Custom Company')
         self.assertEqual(company.email, 'custom@company.com')
-        self.assertEqual(company.members.count(), 1)
+
+        # بررسی تعداد اعضا (owner + 1 member)
+        self.assertEqual(company.members.count(), 2)
+        self.assertIn(self.owner, company.members.all())
         self.assertIn(self.member1, company.members.all())
+
+        # بررسی نقش owner
+        owner_membership = Membership.objects.get(user=self.owner, company=company)
+        self.assertEqual(owner_membership.role, Membership.RoleChoices.ADMIN)
 
     def test_create_company_unauthenticated_returns_401(self):
         """Test that unauthenticated users cannot create companies"""
@@ -132,6 +166,7 @@ class CompanyCreateViewTest(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(Company.objects.count(), 0)
+        self.assertEqual(Membership.objects.count(), 0)
 
     def test_create_company_invalid_data_returns_400(self):
         """Test company creation with invalid data (missing required fields)"""
@@ -147,16 +182,23 @@ class CompanyCreateViewTest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('name', response.data)
         self.assertEqual(Company.objects.count(), 0)
+        self.assertEqual(Membership.objects.count(), 0)
 
     def test_create_company_duplicate_slug_returns_error(self):
         """Test that duplicate slug raises validation error"""
         self.authenticate(self.owner)
 
         # Create first company
-        Company.objects.create(
+        company1 = Company.objects.create(
             owner=self.owner,
             name='First Company',
             slug='duplicate-slug'
+        )
+        # اضافه کردن owner به membership
+        Membership.objects.create(
+            user=self.owner,
+            company=company1,
+            role=Membership.RoleChoices.ADMIN
         )
 
         # Try to create second company with same slug
@@ -168,8 +210,8 @@ class CompanyCreateViewTest(APITestCase):
         response = self.client.post(self.url, payload, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        # Should return validation error for duplicate slug
         self.assertTrue('slug' in response.data or 'non_field_errors' in response.data)
+        self.assertEqual(Company.objects.count(), 1)
 
     def test_create_company_with_empty_members_list(self):
         """Test company creation with empty members list"""
@@ -184,7 +226,14 @@ class CompanyCreateViewTest(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         company = Company.objects.get(id=response.data['id'])
-        self.assertEqual(company.members.count(), 0)
+
+        # فقط owner باید عضو باشد
+        self.assertEqual(company.members.count(), 1)
+        self.assertIn(self.owner, company.members.all())
+
+        # بررسی نقش owner
+        owner_membership = Membership.objects.get(user=self.owner, company=company)
+        self.assertEqual(owner_membership.role, Membership.RoleChoices.ADMIN)
 
     def test_create_company_with_nonexistent_members(self):
         """Test company creation with non-existent member IDs"""
@@ -197,13 +246,10 @@ class CompanyCreateViewTest(APITestCase):
 
         response = self.client.post(self.url, payload, format='json')
 
-        # Should either fail validation or ignore non-existent members
-        # Adjust based on your serializer's behavior
-        if response.status_code == status.HTTP_201_CREATED:
-            company = Company.objects.get(id=response.data['id'])
-            self.assertEqual(company.members.count(), 0)
-        else:
-            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # باید خطای اعتبارسنجی برگردد
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('members', response.data)
+        self.assertEqual(Company.objects.count(), 0)
 
     def test_create_company_without_email_field(self):
         """Test company creation without optional email field"""
@@ -220,6 +266,10 @@ class CompanyCreateViewTest(APITestCase):
         company = Company.objects.get(id=response.data['id'])
         self.assertIsNone(company.email)
 
+        # بررسی اینکه owner اضافه شده
+        self.assertEqual(company.members.count(), 1)
+        self.assertIn(self.owner, company.members.all())
+
     def test_create_company_with_unicode_characters(self):
         """Test company creation with unicode characters in name and slug"""
         self.authenticate(self.owner)
@@ -235,6 +285,15 @@ class CompanyCreateViewTest(APITestCase):
         company = Company.objects.get(id=response.data['id'])
         self.assertEqual(company.name, 'شرکت فناوری اطلاعات')
         self.assertEqual(company.slug, 'it-company')
+
+        # بررسی owner membership
+        self.assertTrue(
+            Membership.objects.filter(
+                user=self.owner,
+                company=company,
+                role=Membership.RoleChoices.ADMIN
+            ).exists()
+        )
 
     def test_create_company_auto_slug_with_unicode(self):
         """Test auto slug generation with unicode characters"""
@@ -264,11 +323,8 @@ class CompanyCreateViewTest(APITestCase):
         # Mock Company.objects.create to raise an exception
         with patch('taskflow.companies.models.Company.objects.create') as mock_create:
             mock_create.side_effect = Exception("Database connection error")
-
-            # Temporarily set DEBUG to True
             response = self.client.post(self.url, payload, format='json')
 
-            # Should return 500 error with error details
             self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
             self.assertIn('detail', response.data)
             self.assertIn('An error occurred', response.data['detail'])
@@ -287,12 +343,8 @@ class CompanyCreateViewTest(APITestCase):
         # Mock Company.objects.create to raise an exception
         with patch('taskflow.companies.models.Company.objects.create') as mock_create:
             mock_create.side_effect = Exception("Database connection error")
-
-            # Temporarily set DEBUG to False
-
             response = self.client.post(self.url, payload, format='json')
 
-            # Should return 500 error with generic message
             self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
             self.assertEqual(response.data, {'detail': 'Server Error'})
             mock_logger.error.assert_called_once()
@@ -313,8 +365,18 @@ class CompanyCreateViewTest(APITestCase):
 
         self.assertEqual(Company.objects.filter(owner=self.owner).count(), 3)
 
-    def test_create_company_with_duplicate_name_not_allowed(self):
-        """Test that companies can have the same name (if model allows)"""
+        # بررسی اینکه owner در هر سه شرکت membership دارد
+        for company in Company.objects.filter(owner=self.owner):
+            self.assertTrue(
+                Membership.objects.filter(
+                    user=self.owner,
+                    company=company,
+                    role=Membership.RoleChoices.ADMIN
+                ).exists()
+            )
+
+    def test_create_company_duplicate_name_not_allowed(self):
+        """Test that companies cannot have duplicate names (name field is unique)"""
         self.authenticate(self.owner)
 
         payload1 = {'name': 'Same Name Company', 'slug': 'first'}
@@ -325,15 +387,55 @@ class CompanyCreateViewTest(APITestCase):
 
         self.assertEqual(response1.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response2.data)
 
         companies = Company.objects.filter(name='Same Name Company')
         self.assertEqual(companies.count(), 1)
+
+    def test_create_company_owner_membership_created_at(self):
+        """Test that membership created_at is set correctly"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Membership Date Test'
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        company = Company.objects.get(id=response.data['id'])
+        membership = Membership.objects.get(user=self.owner, company=company)
+
+        self.assertIsNotNone(membership.joined_at)
+
+    def test_create_company_member_with_owner_in_members_list(self):
+        """Test that if owner is in members list, it doesn't create duplicate"""
+        self.authenticate(self.owner)
+
+        payload = {
+            'name': 'Owner In Members Test',
+            'members': [self.owner.id, self.member1.id]
+        }
+
+        response = self.client.post(self.url, payload, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        company = Company.objects.get(id=response.data['id'])
+
+        # فقط یک رکورد membership برای owner باید وجود داشته باشد
+        owner_memberships = Membership.objects.filter(user=self.owner, company=company)
+        self.assertEqual(owner_memberships.count(), 1)
+        self.assertEqual(owner_memberships.first().role, Membership.RoleChoices.ADMIN)
+
+        # تعداد کل اعضا باید 2 باشد (owner + member1)
+        self.assertEqual(company.members.count(), 2)
 
     def tearDown(self):
         # Clean up cache if you have any cache invalidation
         cache.clear()
         super().tearDown()
-
 
 class CompanyDetailViewTest(APITestCase):
     """Comprehensive tests for CompanyDetailView"""
