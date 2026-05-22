@@ -27,7 +27,7 @@ class BoardCreateSerializer(serializers.ModelSerializer):
         }
 
     def validate_slug(self, value):
-        if Board.objects.filter(slug=value):
+        if Board.objects.filter(slug=value).exists():
             raise serializers.ValidationError("A board with this slug already exists.")
         return value
 
