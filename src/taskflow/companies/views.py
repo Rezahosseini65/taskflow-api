@@ -12,7 +12,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
-from .models import Company
+from .models import Company, Membership
 from .serializers import (
     CompanyDetailSerializer,
     CompanyCreateSerializer
@@ -50,8 +50,20 @@ class CompanyCreateView(APIView):
                     **validated_data
                 )
 
+                Membership.objects.create(
+                    user=request.user,
+                    company=company,
+                    role=Membership.RoleChoices.ADMIN
+                )
+
                 if members:
-                    company.members.add(*members)
+                    for member in members:
+                        if member != request.user:
+                            Membership.objects.create(
+                                user=member,
+                                company=company,
+                                role=Membership.RoleChoices.MEMBER
+                            )
 
                 responses_serializer = CompanyCreateSerializer(
                     company,
