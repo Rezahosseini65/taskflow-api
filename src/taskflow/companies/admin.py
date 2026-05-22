@@ -6,8 +6,24 @@ from django.db.models import Count
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
-from .models import Company
+from .models import Company, Membership  # اضافه کردن Membership
 from ..accounts.models import CustomUser
+
+
+class MembershipInline(admin.TabularInline):
+    """Inline برای مدیریت اعضا از طریق مدل Membership"""
+    model = Membership
+    extra = 1
+    raw_id_fields = ['user']
+    fields = ['user', 'role', 'joined_at']
+    readonly_fields = ['joined_at']
+    verbose_name = _('Member')
+    verbose_name_plural = _('Members')
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == 'user':
+            kwargs['queryset'] = CustomUser.objects.all()
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 
 @admin.register(Company)
@@ -59,7 +75,7 @@ class CompanyAdmin(admin.ModelAdmin):
     # اکشن‌های سفارشی
     actions = ['activate_companies', 'deactivate_companies', 'export_companies']
 
-    # گروه‌بندی فیلدها در صفحه ویرایش
+    # حذف 'members' از fieldsets چون نمی‌تواند مستقیم استفاده شود
     fieldsets = (
         (_('Basic Information'), {
             'fields': (
@@ -73,9 +89,9 @@ class CompanyAdmin(admin.ModelAdmin):
             'fields': ('description', 'logo', 'logo_preview_large'),
             'classes': ('wide',),
         }),
-        (_('Members & Ownership'), {
-            'fields': ('owner', 'members', 'members_list'),
-            'classes': ('collapse',),
+        (_('Ownership'), {  # حذف 'members' از اینجا
+            'fields': ('owner',),
+            'classes': ('wide',),
         }),
         (_('Status'), {
             'fields': ('is_active',),
@@ -85,6 +101,9 @@ class CompanyAdmin(admin.ModelAdmin):
             'classes': ('collapse',),
         }),
     )
+
+    # اضافه کردن inline برای مدیریت اعضا
+    inlines = [MembershipInline]
 
     def get_queryset(self, request):
         """بهینه‌سازی کوئری با count اعضا"""
@@ -155,8 +174,8 @@ class CompanyAdmin(admin.ModelAdmin):
                 '</div>',
                 obj.logo.url,
                 _('Dimensions:'),
-                obj.logo.width if hasattr(obj.logo, 'width') else '?',
-                obj.logo.height if hasattr(obj.logo, 'height') else '?'
+                getattr(obj.logo, 'width', '?'),
+                getattr(obj.logo, 'height', '?')
             )
         return format_html(
             '<div style="padding: 20px; background: #f0f0f0; '
@@ -168,22 +187,30 @@ class CompanyAdmin(admin.ModelAdmin):
 
     @admin.display(description=_('Members List'))
     def members_list(self, obj):
-        """نمایش لیست اعضا با لینک"""
-        members = obj.members.all()[:10]
-        if not members:
+        """نمایش لیست اعضا با لینک از طریق Membership"""
+        memberships = obj.user_memberships.select_related('user').all()[:10]
+        if not memberships:
             return format_html(
                 '<span style="color: gray;">⚠️ {}</span>',
                 _('No members')
             )
 
         members_html = '<div style="max-height: 200px; overflow-y: auto;">'
-        for member in members:
-            url = reverse('admin:accounts_customuser_change', args=[member.id])
+        for membership in memberships:
+            url = reverse('admin:accounts_customuser_change', args=[membership.user.id])
+            role_badge = ''
+            if membership.role == Membership.RoleChoices.ADMIN:
+                role_badge = format_html(
+                    '<span style="background: #FF9800; color: white; '
+                    'padding: 0px 5px; border-radius: 3px; font-size: 10px;'
+                    'margin-left: 8px;">{}</span>',
+                    _('ADMIN')
+                )
             members_html += format_html(
                 '<div style="padding: 5px; border-bottom: 1px solid #eee;">'
-                '<a href="{}">📧 {}</a>'
+                '<a href="{}">📧 {}</a>{}'
                 '</div>',
-                url, member.email
+                url, membership.user.email, role_badge
             )
 
         total_members = obj.members.count()
@@ -264,6 +291,14 @@ class CompanyAdmin(admin.ModelAdmin):
                 obj.owner = request.user
         super().save_model(request, obj, form, change)
 
+        # اطمینان از اینکه owner همیشه در members است
+        if not Membership.objects.filter(user=obj.owner, company=obj).exists():
+            Membership.objects.create(
+                user=obj.owner,
+                company=obj,
+                role=Membership.RoleChoices.ADMIN
+            )
+
     # فیلتر کردن لیست بر اساس دسترسی کاربر
     def get_queryset(self, request):
         qs = super().get_queryset(request)
@@ -280,3 +315,22 @@ class CompanyAdmin(admin.ModelAdmin):
         if db_field.name == 'owner':
             kwargs['queryset'] = CustomUser.objects.filter(is_staff=True)
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+
+@admin.register(Membership)
+class MembershipAdmin(admin.ModelAdmin):
+    """مدیریت مستقیم Membership ها"""
+    list_display = ['user', 'company', 'role', 'joined_at']
+    list_filter = ['role', 'joined_at']
+    search_fields = ['user__email', 'company__name']
+    raw_id_fields = ['user', 'company']
+    readonly_fields = ['joined_at']
+
+    fieldsets = (
+        (_('Membership Information'), {
+            'fields': ('user', 'company', 'role')
+        }),
+        (_('Timestamps'), {
+            'fields': ('joined_at',)
+        }),
+    )
