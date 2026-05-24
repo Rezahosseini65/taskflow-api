@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Company
+from .models import Company, Membership
 from taskflow.accounts.models import CustomUser
 
 
@@ -39,10 +39,20 @@ class UserSimpleSerializer(serializers.ModelSerializer):
         fields = ('id', 'email')
 
 
+class MemberWithRoleSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(source='user.email', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    role = serializers.CharField(source='get_role_display', read_only=True)
+
+    class Meta:
+        model = Membership
+        fields = ('user_id', 'email', 'role', 'joined_at')
+
+
 class CompanyDetailSerializer(serializers.ModelSerializer):
 
     owner = UserSimpleSerializer(read_only=True)
-    members = UserSimpleSerializer(many=True, read_only=True)
+    members = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Company
@@ -56,3 +66,19 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
             'website', 'description', 'logo',
             'is_active', 'created_at', 'updated_at'
         )
+
+    def get_members(self, obj):
+
+        if hasattr(obj, '_prefetched_memberships'):
+            memberships = obj._prefetched_memberships
+            return MemberWithRoleSerializer(memberships, many=True).data
+
+        memberships = Membership.objects.filter(
+            company_id=obj.id
+        ).select_related('user').only(
+            'role', 'joined_at',
+            'user__id', 'user__email'
+        )
+        obj._prefetched_memberships = memberships
+
+        return MemberWithRoleSerializer(memberships, many=True).data
