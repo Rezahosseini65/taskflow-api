@@ -155,6 +155,7 @@ REST_FRAMEWORK = {
         #'rest_framework_simplejwt.authentication.JWTAuthentication',
         'taskflow.accounts.authentication.CookieJWTAuthentication'
     ),
+    'UNAUTHENTICATED_USER': None,
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 10,
     'DEFAULT_THROTTLE_RATES': {
