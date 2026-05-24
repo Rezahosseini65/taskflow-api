@@ -68,7 +68,9 @@ class Company(models.Model):
             models.Index(fields=['slug']),
             models.Index(fields=['owner']),
             models.Index(fields=['is_active']),
-            models.Index(fields=['created_at'])
+            models.Index(fields=['created_at']),
+            models.Index(fields=['owner', 'is_active']),
+            models.Index(fields=['id', 'owner']),
         ]
         ordering = ['-created_at']
 
@@ -81,6 +83,9 @@ class Company(models.Model):
     def get_member_roles(self, user):
         membership = self.user_memberships.filter(user=user).first()
         return membership.role if membership else None
+
+    def get_members_with_roles(self):
+        return self.user_memberships.select_related('user').all()
 
     def __str__(self):
         return f'{self.name}--{self.owner.email}'
@@ -117,6 +122,8 @@ class Membership(models.Model):
         indexes = [
             models.Index(fields=['user', 'company']),
             models.Index(fields=['role']),
+            models.Index(fields=['company_id', 'user_id']),  # این مهم‌ترینه
+            models.Index(fields=['user_id']),
         ]
 
     def __str__(self):
