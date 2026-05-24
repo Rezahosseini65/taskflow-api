@@ -1,6 +1,6 @@
 import logging
 
-from django.db.models import Prefetch, Q
+from django.db.models import Q, Exists, OuterRef
 from django.core.cache import cache
 from django.db import transaction
 from django.utils.text import slugify
@@ -19,7 +19,7 @@ from .serializers import (
 )
 
 from taskflow.accounts.authentication import CookieJWTAuthentication
-from taskflow.accounts.models import CustomUser
+
 
 logger = logging.getLogger(__name__)
 
@@ -114,20 +114,20 @@ class CompanyDetailView(APIView):
 
         company = get_object_or_404(
             Company.objects.filter(
-                Q(owner=request.user) | Q(members=request.user)
-            ).distinct()
-            .select_related('owner').only(
-                    'id', 'name', 'slug', 'email', 'website',
-                    'description', 'logo', 'owner', 'is_active',
-                    'created_at', 'updated_at',
-                    'owner__id', 'owner__email'
-            ).prefetch_related(
-                Prefetch(
-                    'members',
-                    queryset=CustomUser.objects.only('id', 'email')
-                )
-            ),
-            pk=pk
+                Q(owner=request.user) |
+                Q(Exists(Membership.objects.filter(
+                    company_id=OuterRef('id'),
+                    user=request.user
+                ))),
+                pk=pk
+            )
+            .select_related('owner')
+            .only(
+                'id', 'name', 'slug', 'email', 'website',
+                'description', 'logo', 'is_active',
+                'created_at', 'updated_at',
+                'owner__id', 'owner__email'
+            )
         )
 
         serializer = CompanyDetailSerializer(company)
