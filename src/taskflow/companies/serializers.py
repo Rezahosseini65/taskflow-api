@@ -69,16 +69,11 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
 
     def get_members(self, obj):
 
-        if hasattr(obj, '_prefetched_memberships'):
-            memberships = obj._prefetched_memberships
-            return MemberWithRoleSerializer(memberships, many=True).data
-
         memberships = Membership.objects.filter(
             company_id=obj.id
         ).select_related('user').only(
             'role', 'joined_at',
             'user__id', 'user__email'
         )
-        obj._prefetched_memberships = memberships
 
         return MemberWithRoleSerializer(memberships, many=True).data
