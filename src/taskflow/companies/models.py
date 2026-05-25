@@ -127,5 +127,5 @@ class Membership(models.Model):
         ]
 
     def __str__(self):
-        return f'{self.user.email}-{self.company.name}-{self.role}'
+        return f'{self.user.email}-{self.role}'
 
