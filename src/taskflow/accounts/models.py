@@ -89,21 +89,6 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         blank=True,
         null=True
     )
-
-    invited_by = models.ForeignKey(
-        'self',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='invited_users',
-        verbose_name=_('invited by')
-    )
-    invitation_accepted_at = models.DateTimeField(
-        _('invitation accepted at'),
-        null=True,
-        blank=True
-    )
-
     email_notifications_enabled = models.BooleanField(
         _('email notifications'),
         default=True
