@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 # Create your models here.
@@ -128,4 +129,108 @@ class Membership(models.Model):
 
     def __str__(self):
         return f'{self.user.email}-{self.role}'
+
+
+class Invitation(models.Model):
+    class InvitationStatus(models.TextChoices):
+        PENDING = 'pending', _('Pending')
+        ACCEPTED = 'accepted', _('Accepted')
+        EXPIRED = 'expired', _('Expired')
+        CANCELLED = 'cancelled', _('Cancelled')
+
+    class InvitationType(models.TextChoices):
+        EMAIL = 'email', _('Email Invitation')
+        DIRECT = 'direct', _('Direct Invitation')
+        REQUEST = 'request', _('Join Request')
+
+    email = models.EmailField(_('email'))
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name='invitations',
+        verbose_name=_('company')
+    )
+    invited_by = models.ForeignKey(
+        'accounts.CustomUser',
+        on_delete=models.CASCADE,
+        related_name='sent_invitations',
+        verbose_name=_('invited by')
+    )
+    invited_user = models.ForeignKey(
+        'accounts.CustomUser',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='received_invitations',
+        verbose_name=_('invited user')
+    )
+    role = models.CharField(
+        _('role'),
+        max_length=7,
+        choices=Membership.RoleChoices.choices,
+        default=Membership.RoleChoices.MEMBER
+    )
+    invitation_type = models.CharField(
+        _('invitation type'),
+        max_length=10,
+        choices=InvitationType.choices,
+        default=InvitationType.EMAIL
+    )
+    token = models.CharField(
+        _('token'),
+        max_length=100,
+        unique=True
+    )
+    status = models.CharField(
+        _('status'),
+        max_length=20,
+        choices=InvitationStatus.choices,
+        default=InvitationStatus.PENDING
+    )
+    message = models.TextField(_('message'), blank=True)
+    expires_at = models.DateTimeField(_('expires at'))
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _('invitation')
+        verbose_name_plural = _('invitations')
+        indexes = [
+            models.Index(fields=['token']),
+            models.Index(fields=['email', 'status']),
+            models.Index(fields=['company', 'status']),
+            models.Index(fields=['expires_at']),
+            models.Index(fields=['invitation_type']),
+        ]
+        unique_together = ['email', 'company', 'status']
+
+    def __str__(self):
+        return f"{self.get_invitation_type_display()} - {self.email} to {self.company.name}"
+
+    def is_expired(self)->bool:
+        return timezone.now() > self.expires_at
+
+    def accept(self, user):
+        """Accept invitation and add user to company"""
+        if self.is_expired():
+            self.status = self.InvitationStatus.EXPIRED
+            self.save()
+            raise ValueError("Invitation has expired")
+
+        membership, created = Membership.objects.get_or_create(
+            user=user,
+            company=self.company,
+            defaults={'role': self.role}
+        )
+
+        self.status = self.InvitationStatus.ACCEPTED
+        self.invited_user = user
+        self.save()
+
+        return membership
+
+    def cancel(self):
+        """Cancel invitation"""
+        self.status = self.InvitationStatus.CANCELLED
+        self.save()
 
