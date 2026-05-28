@@ -77,3 +77,43 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
         )
 
         return MemberWithRoleSerializer(memberships, many=True).data
+
+
+class RequestJoinCompanySerializer(serializers.Serializer):
+    name = serializers.CharField(
+        max_length=128,
+        write_only=True,
+        trim_whitespace=True
+    )
+    message = serializers.CharField(
+        max_length=1024,
+        required=False,
+        write_only=True,
+        allow_blank=True
+    )
+
+    def validate_name(self, value):
+        request = self.context.get('request')
+
+        try:
+            company_obj = Company.objects.get(
+                name__iexact=value.strip(),
+                is_active=True
+            )
+
+        except Company.DoesNotExist:
+            raise serializers.ValidationError(
+                "Company does not exist or is not active."
+            )
+
+        if Membership.objects.filter(
+                user=request.user,
+                company=company_obj
+        ).exists():
+            raise serializers.ValidationError(
+                "You are already a member of this company."
+            )
+
+        self.context['company_obj'] = company_obj
+
+        return value
