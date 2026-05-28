@@ -15,11 +15,12 @@ from rest_framework.permissions import IsAuthenticated
 from .models import Company, Membership
 from .serializers import (
     CompanyDetailSerializer,
-    CompanyCreateSerializer
+    CompanyCreateSerializer,
+    RequestJoinCompanySerializer
 )
 
 from taskflow.accounts.authentication import CookieJWTAuthentication
-
+from .services.invitation_service import InvitationService
 
 logger = logging.getLogger(__name__)
 
@@ -138,3 +139,118 @@ class CompanyDetailView(APIView):
             serializer.data,
             status=status.HTTP_200_OK
         )
+
+
+class RequestJoinCompanyView(APIView):
+
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieJWTAuthentication]
+
+    def post(self, request):
+        user = request.user
+
+        serializer = RequestJoinCompanySerializer(
+            data=request.data,
+            context={'request':request}
+        )
+
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        company_obj = serializer.context.get('company_obj')
+        message = serializer.validated_data.get('message', '')
+
+        if not company_obj:
+            return Response({
+                'success': False,
+                'error': 'Company not found in context'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            invitation = InvitationService.create_join_request(
+                company_obj.id,
+                request.user,
+                message
+            )
+
+            return Response({
+                'success': True,
+                'message': 'Join request sent successfully',
+                'request_id': invitation.id,
+                'company': {
+                    'id': invitation.company.id,
+                    'name': invitation.company.name
+                }
+            }, status=status.HTTP_201_CREATED)
+
+        except ValueError as e:
+            if settings.DEBUG:
+                return Response({
+                    'success': False,
+                    'error': str(e)
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response({
+                'success': False,
+                'error':'Join request sent unsuccessfully'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ApproveJoinRequestView(APIView):
+
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieJWTAuthentication]
+
+    def post(self, request, invitation_id):
+        try:
+            membership = InvitationService.approve_join_request(invitation_id, request.user)
+            return Response({
+                'message': 'Join request approved',
+                'membership': {
+                    'user_id': membership.user.id,
+                    'company_id': membership.company.id,
+                    'role': membership.role
+                }
+            })
+
+        except PermissionError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        except ValueError as e:
+            if settings.DEBUG:
+                return Response(
+                    {'error': str(e)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            return Response(
+                {'error': 'Join request failed'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+class RejectJoinRequestView(APIView):
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieJWTAuthentication]
+
+    def post(self, request, invitation_id):
+        reason = request.data.get('reason', '')
+        try:
+            _ = InvitationService.reject_join_request(
+                invitation_id,
+                request.user
+            )
+            return Response(
+                {'message': 'Join request rejected'}
+            )
+
+        except PermissionError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_403_FORBIDDEN
+            )
