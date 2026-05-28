@@ -1,17 +1,20 @@
 from unittest.mock import patch
+from datetime import timedelta
 
 from django.core.cache import cache
-from django.test import override_settings
+from django.test import override_settings, TestCase
 from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils.text import slugify
+from django.utils import timezone
 
 from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
 
-from .models import Company, Membership
+from .models import Company, Membership, Invitation
+from .services.invitation_service import InvitationService
 from .views import CompanyDetailView
 
 User = get_user_model()
@@ -813,3 +816,630 @@ class CompanyDetailViewPerformanceTest(APITestCase):
 
         assert response.status_code == status.HTTP_200_OK
         assert response_time < 50, f"Cached response time {response_time}ms > 50ms"
+
+
+class RequestJoinCompanyTests(APITestCase):
+
+    def setUp(self):
+        # Create users
+        self.user = User.objects.create_user(
+            email='user@example.com',
+            password='testPass123',
+            first_name='Test',
+            last_name='User'
+        )
+
+        self.admin_user = User.objects.create_user(
+            email='admin@example.com',
+            password='testPass123',
+            first_name='Admin',
+            last_name='User'
+        )
+
+        self.other_user = User.objects.create_user(
+            email='other@example.com',
+            password='testPass123',
+            first_name='Other',
+            last_name='User'
+        )
+
+        # Create a company
+        self.company = Company.objects.create(
+            name='Test Company',
+            slug='test-company',
+            owner=self.admin_user,
+            is_active=True
+        )
+
+        # Make admin_user an admin of the company
+        Membership.objects.create(
+            user=self.admin_user,
+            company=self.company,
+            role=Membership.RoleChoices.ADMIN
+        )
+
+        # URL for requesting to join
+        self.url = reverse('request-join')
+
+    def authenticate(self, user):
+        """Helper method to authenticate a user"""
+        self.client.force_authenticate(user=user)
+
+    def test_successful_join_request(self):
+        """Test that a user can successfully request to join a company"""
+        self.authenticate(self.user)
+
+        data = {
+            'name': self.company.name,
+            'message': 'I would like to join this company'
+        }
+
+        response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data['success'])
+        self.assertEqual(response.data['message'], 'Join request sent successfully')
+        self.assertEqual(response.data['company']['name'], self.company.name)
+
+        # Verify invitation was created
+        invitation = Invitation.objects.get(
+            email=self.user.email,
+            company=self.company,
+            invitation_type=Invitation.InvitationType.REQUEST
+        )
+        self.assertEqual(invitation.status, Invitation.InvitationStatus.PENDING)
+        self.assertEqual(invitation.message, 'I would like to join this company')
+
+    def test_join_request_without_message(self):
+        """Test join request with default message when no message provided"""
+        self.authenticate(self.user)
+
+        data = {
+            'name': self.company.name
+        }
+
+        response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        invitation = Invitation.objects.get(
+            email=self.user.email,
+            company=self.company
+        )
+        expected_message = f"{self.user.get_full_name()} requests to join your company"
+        self.assertEqual(invitation.message, expected_message)
+
+    def test_join_request_already_member(self):
+        """Test that a user cannot request to join a company they're already a member of"""
+        # Make user a member
+        Membership.objects.create(
+            user=self.user,
+            company=self.company,
+            role=Membership.RoleChoices.MEMBER
+        )
+
+        self.authenticate(self.user)
+
+        data = {'name': self.company.name}
+
+        response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data['success'])
+        self.assertIn('You are already a member', str(response.data['errors']))
+
+    def test_join_request_pending_already(self):
+        """Test that a user cannot create a duplicate pending request"""
+        self.authenticate(self.user)
+
+        # Create existing pending request
+        Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='existing-token',
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=7)
+        )
+
+        data = {'name': self.company.name}
+
+        response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data['success'])
+
+    def test_join_request_nonexistent_company(self):
+        """Test that requesting to join a non-existent company fails"""
+        self.authenticate(self.user)
+
+        data = {'name': 'Company That Does Not Exist'}
+
+        response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data['success'])
+        self.assertIn('Company does not exist', str(response.data['errors']))
+
+    def test_join_request_inactive_company(self):
+        """Test that requesting to join an inactive company fails"""
+        inactive_company = Company.objects.create(
+            name='Inactive Company',
+            slug='inactive-company',
+            owner=self.user,
+            is_active=False
+        )
+
+        self.authenticate(self.user)
+
+        data = {'name': inactive_company.name}
+
+        response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data['success'])
+
+    def test_join_request_unauthenticated(self):
+        """Test that unauthenticated users cannot request to join"""
+        data = {'name': self.company.name}
+
+        response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class ApproveJoinRequestTests(APITestCase):
+
+    def setUp(self):
+        # Create users
+        self.user = User.objects.create_user(
+            email='user@example.com',
+            password='testPass123',
+            first_name='Test',
+            last_name='User'
+        )
+
+        self.admin_user = User.objects.create_user(
+            email='admin@example.com',
+            password='testPass123',
+            first_name='Admin',
+            last_name='User'
+        )
+
+        self.non_admin_user = User.objects.create_user(
+            email='nonadmin@example.com',
+            password='testPass123'
+        )
+
+        # Create a company
+        self.company = Company.objects.create(
+            name='Test Company',
+            slug='test-company',
+            owner=self.admin_user,
+            is_active=True
+        )
+
+        # Make admin_user an admin
+        Membership.objects.create(
+            user=self.admin_user,
+            company=self.company,
+            role=Membership.RoleChoices.ADMIN
+        )
+
+        # Make non_admin_user a regular member
+        Membership.objects.create(
+            user=self.non_admin_user,
+            company=self.company,
+            role=Membership.RoleChoices.MEMBER
+        )
+
+        # Create a join request
+        self.invitation = Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='test-token-123',
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+
+        self.url = reverse('approve-request', args=[self.invitation.id])
+
+    def authenticate(self, user):
+        """Helper method to authenticate a user"""
+        self.client.force_authenticate(user=user)
+
+    def test_admin_approves_join_request(self):
+        """Test that an admin can approve a join request"""
+        self.authenticate(self.admin_user)
+
+        response = self.client.post(self.url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['message'], 'Join request approved')
+        self.assertEqual(response.data['membership']['user_id'], self.user.id)
+        self.assertEqual(response.data['membership']['company_id'], self.company.id)
+        self.assertEqual(response.data['membership']['role'], Membership.RoleChoices.MEMBER)
+
+        # Verify membership was created
+        membership_exists = Membership.objects.filter(
+            user=self.user,
+            company=self.company
+        ).exists()
+        self.assertTrue(membership_exists)
+
+        # Verify invitation status was updated
+        self.invitation.refresh_from_db()
+        self.assertEqual(self.invitation.status, Invitation.InvitationStatus.ACCEPTED)
+
+    def test_non_admin_cannot_approve_request(self):
+        """Test that a non-admin user cannot approve a join request"""
+        self.authenticate(self.non_admin_user)
+
+        response = self.client.post(self.url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('Only admins can approve', str(response.data['error']))
+
+        # Verify membership was not created
+        membership_exists = Membership.objects.filter(
+            user=self.user,
+            company=self.company
+        ).exists()
+        self.assertFalse(membership_exists)
+
+    def test_approve_nonexistent_request(self):
+        """Test that approving a non-existent request fails"""
+        self.authenticate(self.admin_user)
+
+        url = reverse('approve-request', args=[99999])
+        response = self.client.post(url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_approve_already_approved_request(self):
+        """Test that approving an already approved request fails"""
+        self.invitation.status = Invitation.InvitationStatus.ACCEPTED
+        self.invitation.save()
+
+        self.authenticate(self.admin_user)
+
+        response = self.client.post(self.url, format='json')
+
+        # Should handle appropriately - likely raise an error
+        self.assertNotEqual(response.status_code, status.HTTP_200_OK)
+
+
+class RejectJoinRequestTests(APITestCase):
+
+    def setUp(self):
+        # Create users
+        self.user = User.objects.create_user(
+            email='user@example.com',
+            password='testPass123',
+            first_name='Test',
+            last_name='User'
+        )
+
+        self.admin_user = User.objects.create_user(
+            email='admin@example.com',
+            password='testPass123'
+        )
+
+        self.non_admin_user = User.objects.create_user(
+            email='nonadmin@example.com',
+            password='testPass123'
+        )
+
+        # Create a company
+        self.company = Company.objects.create(
+            name='Test Company',
+            slug='test-company',
+            owner=self.admin_user,
+            is_active=True
+        )
+
+        # Make admin_user an admin
+        Membership.objects.create(
+            user=self.admin_user,
+            company=self.company,
+            role=Membership.RoleChoices.ADMIN
+        )
+
+        # Make non_admin_user a regular member
+        Membership.objects.create(
+            user=self.non_admin_user,
+            company=self.company,
+            role=Membership.RoleChoices.MEMBER
+        )
+
+        # Create a join request
+        self.invitation = Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='test-token-456',
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+
+        self.url = reverse('reject-request', args=[self.invitation.id])
+
+    def authenticate(self, user):
+        """Helper method to authenticate a user"""
+        self.client.force_authenticate(user=user)
+
+    def test_admin_rejects_join_request(self):
+        """Test that an admin can reject a join request"""
+        self.authenticate(self.admin_user)
+
+        response = self.client.post(self.url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['message'], 'Join request rejected')
+
+        # Verify invitation status was updated to REJECTED
+        self.invitation.refresh_from_db()
+        self.assertEqual(self.invitation.status, Invitation.InvitationStatus.CANCELLED)
+
+        # Verify membership was NOT created
+        membership_exists = Membership.objects.filter(
+            user=self.user,
+            company=self.company
+        ).exists()
+        self.assertFalse(membership_exists)
+
+    def test_admin_rejects_with_reason(self):
+        """Test that admin can reject with a reason (though reason isn't used yet)"""
+        self.authenticate(self.admin_user)
+
+        data = {'reason': 'Not a good fit for the team'}
+        response = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.invitation.refresh_from_db()
+        self.assertEqual(self.invitation.status, Invitation.InvitationStatus.CANCELLED)
+
+    def test_non_admin_cannot_reject_request(self):
+        """Test that a non-admin user cannot reject a join request"""
+        self.authenticate(self.non_admin_user)
+
+        response = self.client.post(self.url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn('Only admins can reject', str(response.data['error']))
+
+        # Verify invitation is still pending
+        self.invitation.refresh_from_db()
+        self.assertEqual(self.invitation.status, Invitation.InvitationStatus.PENDING)
+
+    def test_reject_nonexistent_request(self):
+        """Test that rejecting a non-existent request fails"""
+        self.authenticate(self.admin_user)
+
+        url = reverse('reject-request', args=[99999])
+        response = self.client.post(url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_reject_already_rejected_request(self):
+        """Test that rejecting an already rejected request is idempotent"""
+        self.invitation.status = Invitation.InvitationStatus.CANCELLED
+        self.invitation.save()
+
+        self.authenticate(self.admin_user)
+
+        response = self.client.post(self.url, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.invitation.refresh_from_db()
+        self.assertEqual(self.invitation.status, Invitation.InvitationStatus.CANCELLED)
+
+    def test_unauthenticated_user_cannot_reject(self):
+        """Test that unauthenticated users cannot reject requests"""
+        response = self.client.post(self.url, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class InvitationServiceTests(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email='user@example.com',
+            password='testPass123',
+            first_name='Test',
+            last_name='User'
+        )
+
+        self.admin_user = User.objects.create_user(
+            email='admin@example.com',
+            password='testPass123'
+        )
+
+        self.company = Company.objects.create(
+            name='Test Company',
+            slug='test-company',
+            owner=self.admin_user,
+            is_active=True
+        )
+
+        Membership.objects.create(
+            user=self.admin_user,
+            company=self.company,
+            role=Membership.RoleChoices.ADMIN
+        )
+
+    def test_generate_token(self):
+        """Test token generation creates unique tokens"""
+        token1 = InvitationService.generate_token()
+        token2 = InvitationService.generate_token()
+
+        self.assertIsNotNone(token1)
+        self.assertIsNotNone(token2)
+        self.assertNotEqual(token1, token2)
+        self.assertTrue(len(token1) > 20)
+
+    def test_create_expiry_date(self):
+        """Test expiry date creation"""
+        expiry = InvitationService.create_expiry_date(days=7)
+        now = timezone.now()
+
+        self.assertTrue(expiry > now)
+        self.assertTrue(expiry - now <= timedelta(days=7, seconds=1))
+
+    def test_create_expiry_date_default(self):
+        """Test expiry date with default days"""
+        expiry = InvitationService.create_expiry_date()
+        now = timezone.now()
+
+        self.assertTrue(expiry > now)
+        self.assertTrue(expiry - now <= timedelta(days=7, seconds=1))
+
+    def test_create_join_request_success(self):
+        """Test successful creation of join request"""
+        invitation = InvitationService.create_join_request(
+            self.company.id,
+            self.user,
+            "Please let me join"
+        )
+
+        self.assertIsNotNone(invitation)
+        self.assertEqual(invitation.email, self.user.email)
+        self.assertEqual(invitation.company, self.company)
+        self.assertEqual(invitation.status, Invitation.InvitationStatus.PENDING)
+        self.assertEqual(invitation.invitation_type, Invitation.InvitationType.REQUEST)
+        self.assertEqual(invitation.message, "Please let me join")
+
+    def test_create_join_request_already_member(self):
+        """Test error when user is already a member"""
+        Membership.objects.create(
+            user=self.user,
+            company=self.company,
+            role=Membership.RoleChoices.MEMBER
+        )
+
+        with self.assertRaises(ValueError) as context:
+            InvitationService.create_join_request(self.company.id, self.user)
+
+        self.assertIn("already a member", str(context.exception))
+
+    def test_create_join_request_pending_exists(self):
+        """Test error when pending request already exists"""
+        Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='test-token',
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=7)
+        )
+
+        with self.assertRaises(ValueError) as context:
+            InvitationService.create_join_request(self.company.id, self.user)
+
+        self.assertIn("already have a pending", str(context.exception))
+
+    def test_approve_join_request_success(self):
+        """Test successful approval of join request"""
+        invitation = Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='approve-test-token',
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+
+        membership = InvitationService.approve_join_request(
+            invitation.id,
+            self.admin_user
+        )
+
+        self.assertIsNotNone(membership)
+        self.assertEqual(membership.user, self.user)
+        self.assertEqual(membership.company, self.company)
+        self.assertEqual(membership.role, Membership.RoleChoices.MEMBER)
+
+    def test_approve_join_request_non_admin(self):
+        """Test error when non-admin tries to approve"""
+        non_admin = User.objects.create_user(
+            email='nonadmin2@example.com',
+            password='testPass123'
+        )
+
+        invitation = Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='approve-test-token',
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+
+        with self.assertRaises(PermissionError) as context:
+            InvitationService.approve_join_request(invitation.id, non_admin)
+
+        self.assertIn("Only admins", str(context.exception))
+
+    def test_reject_join_request_success(self):
+        """Test successful rejection of join request"""
+        invitation = Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='reject-test-token',
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+
+        rejected_invitation = InvitationService.reject_join_request(
+            invitation.id,
+            self.admin_user
+        )
+
+        self.assertEqual(rejected_invitation.status, Invitation.InvitationStatus.CANCELLED)
+
+    def test_reject_join_request_non_admin(self):
+        """Test error when non-admin tries to reject"""
+        non_admin = User.objects.create_user(
+            email='nonadmin3@example.com',
+            password='testPass123'
+        )
+
+        invitation = Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='reject-test-token',
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+
+        with self.assertRaises(PermissionError) as context:
+            InvitationService.reject_join_request(invitation.id, non_admin)
+
+        self.assertIn("Only admins", str(context.exception))
