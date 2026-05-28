@@ -64,6 +64,14 @@ class InvitationService:
             id=invitation_id
         )
 
+        # Check if already approved
+        if invitation.status == Invitation.InvitationStatus.ACCEPTED:
+            raise ValueError("This request has already been approved")
+
+        # Check if already rejected
+        if invitation.status == Invitation.InvitationStatus.CANCELLED:
+            raise ValueError("This request has already been rejected")
+
         membership = Membership.objects.filter(
             user=admin_user,
             company=invitation.company,
@@ -93,7 +101,7 @@ class InvitationService:
         if not membership:
             raise PermissionError("Only admins can reject join requests")
 
-        invitation.status = Invitation.InvitationStatus.REJECTED
+        invitation.status = Invitation.InvitationStatus.CANCELLED
         invitation.save()
 
         return invitation
