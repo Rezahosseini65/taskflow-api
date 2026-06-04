@@ -9,6 +9,10 @@ INSTALLED_APPS += [
     'debug_toolbar',
 ]
 
+MIDDLEWARE += [
+    "taskflow.middlewares.query_middleware.QueryCountMiddleware",
+]
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -25,6 +29,8 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'API documentation for Your Project',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    'SERVE_PERMISSIONS': ['rest_framework.permissions.AllowAny'],
+    'SERVE_AUTHENTICATION': []
 }
 
 INTERNAL_IPS = [
