@@ -1,6 +1,8 @@
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
+from drf_spectacular.extensions import OpenApiAuthenticationExtension
+
 
 class CookieJWTAuthentication(JWTAuthentication):
     def authenticate(self, request):
@@ -19,3 +21,15 @@ class CookieJWTAuthentication(JWTAuthentication):
             return (user, validated_token)
         except Exception:
             raise AuthenticationFailed('Invalid token')
+
+
+class CookieJWTAuthenticationScheme(OpenApiAuthenticationExtension):
+    target_class = CookieJWTAuthentication
+    name = 'cookieAuth'
+    def get_security_definition(self, auto_schema):
+        return {
+            'type': 'apiKey',
+            'in': 'cookie',
+            'name': 'access_token',
+            'description': 'JWT token stored in cookie',
+        }
