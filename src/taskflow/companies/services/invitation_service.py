@@ -2,12 +2,16 @@ import secrets
 from datetime import timedelta
 
 from django.utils import timezone
+
 from rest_framework.generics import get_object_or_404
 
-from taskflow.companies.models import Company, Membership, Invitation
+from taskflow.companies.models import Membership, Invitation
 
 
 class InvitationService:
+
+    class JoinRequestError(Exception):
+        pass
 
     @staticmethod
     def generate_token()->str:
@@ -20,47 +24,9 @@ class InvitationService:
         return timezone.now() + timedelta(days=days)
 
     @staticmethod
-    def create_join_request(company_id, user, message=None):
-        company = get_object_or_404(
-            Company,
-            id=company_id
-        )
-
-        if Membership.objects.filter(
-            user=user,
-            company=company
-        ).exists():
-            raise ValueError("You are already a member of this company")
-
-        existing_request = Invitation.objects.filter(
-            email=user.email,
-            company=company,
-            status=Invitation.InvitationStatus.PENDING,
-            invitation_type=Invitation.InvitationType.REQUEST
-        ).exists()
-
-        if existing_request:
-            raise ValueError("You already have a pending join request")
-
-        invitation = Invitation.objects.create(
-            email=user.email,
-            company=company,
-            invited_by=user,
-            invited_user=user,
-            role = Membership.RoleChoices.MEMBER,
-            invitation_type=Invitation.InvitationType.REQUEST,
-            token=InvitationService.generate_token(),
-            status=Invitation.InvitationStatus.PENDING,
-            message=message or f"{user.get_full_name()} requests to join your company",
-            expires_at=InvitationService.create_expiry_date(days=30)
-        )
-
-        return invitation
-
-    @staticmethod
     def approve_join_request(invitation_id, admin_user):
         invitation = get_object_or_404(
-            Invitation,
+            Invitation.objects.select_related('company', 'invited_user'),
             id=invitation_id
         )
 
@@ -88,7 +54,7 @@ class InvitationService:
     @staticmethod
     def reject_join_request(invitation_id, admin_user, reason=None):
         invitation = get_object_or_404(
-            Invitation,
+            Invitation.objects.select_related('company', 'invited_user'),
             id=invitation_id
         )
 
