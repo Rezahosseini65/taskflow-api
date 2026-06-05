@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from .models import Company, Membership
+from .tasks import create_join_request_task
 from .serializers import (
     CompanyDetailSerializer,
     CompanyCreateSerializer,
@@ -142,16 +143,13 @@ class CompanyDetailView(APIView):
 
 
 class RequestJoinCompanyView(APIView):
-
     permission_classes = [IsAuthenticated]
     authentication_classes = [CookieJWTAuthentication]
 
     def post(self, request):
-        user = request.user
-
         serializer = RequestJoinCompanySerializer(
             data=request.data,
-            context={'request':request}
+            context={'request': request}
         )
 
         if not serializer.is_valid():
@@ -160,42 +158,23 @@ class RequestJoinCompanyView(APIView):
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        company_obj = serializer.context.get('company_obj')
-        message = serializer.validated_data.get('message', '')
-
-        if not company_obj:
-            return Response({
-                'success': False,
-                'error': 'Company not found in context'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
         try:
-            invitation = InvitationService.create_join_request(
-                company_obj.id,
-                request.user,
-                message
+            task = create_join_request_task.delay(
+                company_name=serializer.validated_data['name'],
+                user_id=request.user.id,
+                message=serializer.validated_data.get('message', '')
             )
 
             return Response({
-                'success': True,
-                'message': 'Join request sent successfully',
-                'request_id': invitation.id,
-                'company': {
-                    'id': invitation.company.id,
-                    'name': invitation.company.name
-                }
-            }, status=status.HTTP_201_CREATED)
+                'task_id': task.id,
+                'status': task.status,
+                'message': 'Join request is being processed asynchronously'
+            }, status=status.HTTP_202_ACCEPTED)
 
-        except ValueError as e:
-            if settings.DEBUG:
-                return Response({
-                    'success': False,
-                    'error': str(e)
-                }, status=status.HTTP_400_BAD_REQUEST)
-
+        except InvitationService.JoinRequestError as e:
             return Response({
                 'success': False,
-                'error':'Join request sent unsuccessfully'
+                'error': str(e) if settings.DEBUG else 'Join request failed'
             }, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -243,7 +222,8 @@ class RejectJoinRequestView(APIView):
         try:
             _ = InvitationService.reject_join_request(
                 invitation_id,
-                request.user
+                request.user,
+                reason
             )
             return Response(
                 {'message': 'Join request rejected'}
