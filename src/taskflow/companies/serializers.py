@@ -1,3 +1,5 @@
+from django.db.models import Exists, OuterRef
+
 from rest_framework import serializers
 
 from .models import Company, Membership
@@ -93,27 +95,5 @@ class RequestJoinCompanySerializer(serializers.Serializer):
     )
 
     def validate_name(self, value):
-        request = self.context.get('request')
-
-        try:
-            company_obj = Company.objects.get(
-                name__iexact=value.strip(),
-                is_active=True
-            )
-
-        except Company.DoesNotExist:
-            raise serializers.ValidationError(
-                "Company does not exist or is not active."
-            )
-
-        if Membership.objects.filter(
-                user=request.user,
-                company=company_obj
-        ).exists():
-            raise serializers.ValidationError(
-                "You are already a member of this company."
-            )
-
-        self.context['company_obj'] = company_obj
-
+        self.context['company_name'] = value.strip()
         return value
