@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -25,6 +24,7 @@ LOCAL_APPS = [
     'taskflow.accounts',
     'taskflow.boards',
     'taskflow.companies',
+    'taskflow.notifications',
 ]
 
 THIRD_PARTY_APPS = [
