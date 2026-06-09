@@ -7,6 +7,7 @@ from django.db import transaction
 
 from .models import Company, Membership, Invitation
 from taskflow.companies.services.invitation_service import InvitationService
+from taskflow.notifications.models import Notification
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,12 @@ def create_join_request_task(self, company_name, user_id, message=None):
                 expires_at=InvitationService.create_expiry_date()
             )
 
+            admins_notified = send_notification_to_admins(
+                company=company,
+                requester_user=user,
+                invitation=invitation
+            )
+
             logger.info(
                 f"Join request created in Celery: user={user.email}, "
                 f"company={company.name}, invitation_id={invitation.id}"
@@ -81,6 +88,7 @@ def create_join_request_task(self, company_name, user_id, message=None):
                 'invitation_status': invitation.status,
                 'expires_at': invitation.expires_at.isoformat() if invitation.expires_at else None,
                 'message': invitation.message,
+                'admins_notified': admins_notified,
             }
 
     except InvitationService.JoinRequestError as e:
@@ -96,3 +104,44 @@ def create_join_request_task(self, company_name, user_id, message=None):
         logger.exception(f"Unexpected error in async_create_join_request: {str(e)}")
         raise self.retry(exc=e, countdown=60 * (self.request.retries + 1))
 
+
+def send_notification_to_admins(company, requester_user, invitation):
+
+    admin_memberships = Membership.objects.filter(
+        company=company,
+        role__in=[Membership.RoleChoices.OWNER, Membership.RoleChoices.ADMIN]
+    ).select_related('user')
+
+    if not admin_memberships.exists():
+            admin_memberships = Membership.objects.filter(
+            company=company,
+            role=Membership.RoleChoices.OWNER
+        ).select_related('user')
+
+    if not admin_memberships.exists():
+        logger.warning(f"No owner or admin found for company {company.id}")
+        return 0
+
+    notifications = []
+    for membership in admin_memberships:
+        notification = Notification(
+            recipient=membership.user,
+            sender=requester_user,
+            notification_type=Notification.NotificationType.JOIN_REQUEST,
+            title=f"درخواست عضویت جدید در {company.name}",
+            message=f"{requester_user.email} درخواست عضویت در {company.name} را دارد.",
+            action_url=f"/invitations/review/{invitation.token}/",
+            invitation=invitation,
+            company=company,
+            status=Notification.NotificationStatus.UNREAD
+        )
+        notifications.append(notification)
+
+    if notifications:
+        Notification.objects.bulk_create(notifications)
+        logger.info(
+            f"Sent {len(notifications)} notifications to admins of {company.name}: "
+            f"{[m.user.email for m in admin_memberships]}"
+        )
+
+    return len(notifications)
