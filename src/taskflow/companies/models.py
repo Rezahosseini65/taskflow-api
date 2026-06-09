@@ -96,6 +96,8 @@ class Membership(models.Model):
     class RoleChoices(models.TextChoices):
         ADMIN = 'Admin', _('admin')
         MEMBER = 'Member', _('member')
+        OWNER = 'Owner', _('owner')
+
     user = models.ForeignKey(
         'accounts.CustomUser',
         on_delete=models.CASCADE,
