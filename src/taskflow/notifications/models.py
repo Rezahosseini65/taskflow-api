@@ -112,5 +112,14 @@ class Notification(models.Model):
             read_at=timezone.now()
         )
 
+    @property
+    def is_read(self):
+        return self.status == self.NotificationStatus.READ
+
+    @property
+    def time_ago(self):
+        from django.utils.timesince import timesince
+        return timesince(self.created_at)
+
     def __str__(self):
         return f'{self.recipient.email} - {self.title}'
