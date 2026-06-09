@@ -8,9 +8,10 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('__debug__/', include("debug_toolbar.urls")),
 
-    path('api/users/', include('taskflow.accounts.urls'), name='register-user'),
-    path('api/boards/', include('taskflow.boards.urls'), name='create-board'),
+    path('api/users/', include('taskflow.accounts.urls'), name='users'),
+    path('api/boards/', include('taskflow.boards.urls'), name='boards'),
     path('api/companies/', include('taskflow.companies.urls'), name='companies'),
+    path('api/notifications/', include('taskflow.notifications.urls'), name='notifications'),
 
     path('api/schema/swagger-ui/', SpectacularSwaggerView.as_view(url_name='api-schema'), name='swagger-ui'),
     path('api/schema/', SpectacularAPIView.as_view(), name='api-schema'),
