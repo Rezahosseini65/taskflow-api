@@ -55,7 +55,7 @@ class CompanyCreateView(APIView):
                 Membership.objects.create(
                     user=request.user,
                     company=company,
-                    role=Membership.RoleChoices.ADMIN
+                    role=Membership.RoleChoices.OWNER
                 )
 
                 if members:
