@@ -34,7 +34,8 @@ class UserRegisterView(APIView):
     and refresh tokens, and sets these tokens as HTTP-only cookies in the response.
     The entire process is wrapped in a database transaction to ensure atomicity.
     """
-    throttle_classes = [UserRegisterThrottle]
+    #TODO: UserRegisterThrottle will be enabled later
+    #throttle_classes = [UserRegisterThrottle]
     authentication_classes = []
 
     def post(self, request):
