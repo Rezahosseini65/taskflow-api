@@ -12,8 +12,8 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
-from .models import Company, Membership
-from .tasks import create_join_request_task
+from .models import Company, Membership, Invitation
+from .tasks import create_join_request_task, accept_invitation_task
 from .serializers import (
     CompanyDetailSerializer,
     CompanyCreateSerializer,
@@ -39,6 +39,7 @@ class CompanyCreateView(APIView):
         )
         if serializer.is_valid():
             validated_data = serializer.validated_data
+            name = serializer.validated_data.pop('name')
             members = validated_data.pop('members', [])
             slug = validated_data.pop('slug', None)
 
@@ -47,6 +48,7 @@ class CompanyCreateView(APIView):
                     slug = slugify(validated_data['name'], allow_unicode=True)
 
                 company = Company.objects.create(
+                    name=name.lower(),
                     owner=request.user,
                     slug=slug,
                     **validated_data
@@ -147,6 +149,7 @@ class RequestJoinCompanyView(APIView):
     authentication_classes = [CookieJWTAuthentication]
 
     def post(self, request):
+        user = request.user
         serializer = RequestJoinCompanySerializer(
             data=request.data,
             context={'request': request}
@@ -158,9 +161,46 @@ class RequestJoinCompanyView(APIView):
                 'errors': serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        company_name = serializer.validated_data['company_name']
+
+        company = Company.objects.filter(
+            name=company_name.lower(),
+            is_active=True
+        ).annotate(
+            is_member=Exists(
+                Membership.objects.filter(user=user, company_id=OuterRef("id"))
+            ),
+            has_pending_request=Exists(
+                Invitation.objects.filter(
+                    email=user.email,
+                    company_id=OuterRef('id'),
+                    status=Invitation.InvitationStatus.PENDING,
+                    invitation_type=Invitation.InvitationType.REQUEST
+                )
+            )
+        ).only('id', 'email').first()
+
+        if not company:
+            return Response(
+                {"error":"Company does not exist or is not active."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if company.is_member:
+            return Response(
+                {"error":"You are already a member of this company"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if company.has_pending_request:
+            return Response(
+                {"error":"You already have a pending join request"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         try:
             task = create_join_request_task.delay(
-                company_name=serializer.validated_data['name'],
+                company_name=company_name,
                 user_id=request.user.id,
                 message=serializer.validated_data.get('message', '')
             )
@@ -178,39 +218,79 @@ class RequestJoinCompanyView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
 
-class ApproveJoinRequestView(APIView):
+class AcceptJoinRequestView(APIView):
+    """
+    Accept a join request invitation.
+    """
 
     permission_classes = [IsAuthenticated]
     authentication_classes = [CookieJWTAuthentication]
 
-    def post(self, request, invitation_id):
+    def post(self, request, token):
         try:
-            membership = InvitationService.approve_join_request(invitation_id, request.user)
+            # Execute task asynchronously
+            task = accept_invitation_task.delay(token, request.user.id)
+
             return Response({
-                'message': 'Join request approved',
-                'membership': {
-                    'user_id': membership.user.id,
-                    'company_id': membership.company.id,
-                    'role': membership.role
-                }
-            })
+                'status': 'processing',
+                'task_id': task.id,
+                'message': 'Join request is being processed',
+                'detail': 'Join request is being processed asynchronously',
+                'token': token
+            }, status=status.HTTP_202_ACCEPTED)
 
         except PermissionError as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({
+                'status': 'error',
+                'error': 'permission_denied',
+                'message': 'You do not have permission to approve this request',
+                'detail': str(e)
+            }, status=status.HTTP_403_FORBIDDEN)
 
         except ValueError as e:
-            if settings.DEBUG:
-                return Response(
-                    {'error': str(e)},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            return Response(
-                {'error': 'Join request failed'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            # Validation error (e.g., expired invitation)
+            error_message = str(e)
+
+            if 'expired' in error_message.lower():
+                return Response({
+                    'status': 'error',
+                    'error': 'invitation_expired',
+                    'message': 'The join request link has expired',
+                    'detail': error_message
+                }, status=status.HTTP_400_BAD_REQUEST)
+            elif 'already' in error_message.lower():
+                return Response({
+                    'status': 'error',
+                    'error': 'already_processed',
+                    'message': 'This request has already been processed',
+                    'detail': error_message
+                }, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                return Response({
+                    'status': 'error',
+                    'error': 'validation_error',
+                    'message': 'Invalid request data',
+                    'detail': error_message if settings.DEBUG else None
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        except Invitation.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'error': 'invitation_not_found',
+                'message': 'Join request not found',
+                'detail': 'The invitation does not exist or has been removed'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        except Exception as e:
+            # Unexpected error
+            logger.exception(f"Unexpected error in AcceptJoinRequestView: {str(e)}")
+
+            return Response({
+                'status': 'error',
+                'error': 'internal_server_error',
+                'message': 'An unexpected error occurred. Please try again.',
+                'detail': str(e) if settings.DEBUG else None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class RejectJoinRequestView(APIView):
