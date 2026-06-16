@@ -819,161 +819,367 @@ class CompanyDetailViewPerformanceTest(APITestCase):
         assert response_time < 50, f"Cached response time {response_time}ms > 50ms"
 
 
-class CreateJoinRequestTaskTests(TestCase):
+class RequestJoinCompanyViewTest(APITestCase):
 
     def setUp(self):
+        """Setup test data"""
+        # Create test user
         self.user = User.objects.create_user(
-            email='user@example.com',
-            password='testPass123'
+            email='test@example.com',
+            password='passTest123',
+            first_name='Test',
+            last_name='User'
         )
+
+        # Create company admin
         self.admin_user = User.objects.create_user(
             email='admin@example.com',
-            password='testPass123'
+            password='passTest123',
+            first_name='Admin',
+            last_name='User'
         )
+
+        # Create test company
         self.company = Company.objects.create(
-            name='Test Company',
+            name='test company',
             slug='test-company',
             owner=self.admin_user,
-            is_active=True
+            is_active = True,
+            email = 'test@company.com'
         )
-        Membership.objects.create(
+
+        # Add admin as member with admin role
+        self.admin_membership = Membership.objects.create(
             user=self.admin_user,
             company=self.company,
             role=Membership.RoleChoices.ADMIN
         )
 
-    def test_task_success(self):
-        """Test successful join request creation via Celery task"""
-        from .tasks import create_join_request_task
+        # Get the URL for the view
+        self.url = reverse('request-join')
 
-        result = create_join_request_task(
-            company_name='Test Company',
+    def authenticate(self):
+        """Helper method to authenticate user"""
+        self.client.force_authenticate(user=self.user)
+
+    @patch('taskflow.companies.views.create_join_request_task.delay')
+    def test_successful_join_request(self, mock_delay):
+        """Test successful join request"""
+        # Arrange
+        self.authenticate()
+        mock_task = MagicMock()
+        mock_task.id = 'test-task-123'
+        mock_task.status = 'PENDING'
+        mock_delay.return_value = mock_task
+
+        data = {
+            'company_name': 'test company',
+            'message': 'I would like to join this company'
+        }
+
+        # Act
+        response = self.client.post(self.url, data, format='json')
+
+        # Assert
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data['task_id'], 'test-task-123')
+        self.assertEqual(response.data['status'], 'PENDING')
+        self.assertEqual(response.data['message'], 'Join request is being processed asynchronously')
+
+        # Verify task was called with correct arguments
+        mock_delay.assert_called_once_with(
+            company_name='test company',
             user_id=self.user.id,
-            message='Please add me'
+            message='I would like to join this company'
         )
 
-        self.assertEqual(result['status'], 'success')
-        self.assertEqual(result['user_email'], self.user.email)
-        self.assertEqual(result['company_name'], 'Test Company')
+    @patch('taskflow.companies.views.create_join_request_task.delay')
+    def test_successful_join_request_without_message(self, mock_delay):
+        """Test successful join request without providing a message"""
+        # Arrange
+        self.authenticate()
+        mock_task = MagicMock()
+        mock_task.id = 'test-task-123'
+        mock_task.status = 'PENDING'
+        mock_delay.return_value = mock_task
 
-        invitation_exists = Invitation.objects.filter(
-            email=self.user.email,
-            company=self.company,
-            invitation_type=Invitation.InvitationType.REQUEST,
-            status=Invitation.InvitationStatus.PENDING
-        ).exists()
-        self.assertTrue(invitation_exists)
+        data = {
+            'company_name': 'test company'
+        }
 
-    def test_task_user_not_found(self):
-        """Test task when user doesn't exist"""
-        from .tasks import create_join_request_task
+        # Act
+        response = self.client.post(self.url, data, format='json')
 
-        result = create_join_request_task(
-            company_name='Test Company',
-            user_id=99999,
+        # Assert
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+        # Verify task was called with empty message
+        mock_delay.assert_called_once_with(
+            company_name='test company',
+            user_id=self.user.id,
             message=''
         )
 
-        self.assertEqual(result['status'], 'error')
-        self.assertIn('does not exist', result['error'])
+    def test_unauthenticated_user(self):
+        """Test that unauthenticated users cannot access the endpoint"""
+        # Arrange
+        data = {
+            'company_name': 'test company'
+        }
 
-    def test_task_company_not_found(self):
-        """Test task when company doesn't exist"""
-        from .tasks import create_join_request_task
+        # Act
+        response = self.client.post(self.url, data, format='json')
 
-        result = create_join_request_task(
-            company_name='Non Existent Company',
-            user_id=self.user.id,
-            message=''
+        # Assert
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_company_does_not_exist(self):
+        """Test requesting to join a non-existent company"""
+        # Arrange
+        self.authenticate()
+        data = {
+            'company_name': 'nonexistentcompany'
+        }
+
+        # Act
+        response = self.client.post(self.url, data, format='json')
+
+        # Assert
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['error'],
+            'Company does not exist or is not active.'
         )
 
-        self.assertEqual(result['status'], 'failed')
-        self.assertIn('Company does not exist', result['error'])
+    def test_inactive_company(self):
+        """Test requesting to join an inactive company"""
+        # Arrange
+        self.authenticate()
+        inactive_company = Company.objects.create(
+            name='inactivecompany',
+            owner=self.admin_user,
+            is_active=False,
+            email='inactive@company.com'
+        )
+        data = {
+            'company_name': 'inactivecompany'
+        }
 
-    def test_task_already_member(self):
-        """Test task when user is already a member"""
+        # Act
+        response = self.client.post(self.url, data, format='json')
+
+        # Assert
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['error'],
+            'Company does not exist or is not active.'
+        )
+
+    def test_user_already_member(self):
+        """Test user cannot request to join when already a member"""
+        # Arrange
+        self.authenticate()
+        # Make user a member of the company
         Membership.objects.create(
             user=self.user,
             company=self.company,
-            role=Membership.RoleChoices.MEMBER
+            role=Membership.RoleChoices.MEMBER,
         )
-
-        from .tasks import create_join_request_task
-
-        result = create_join_request_task(
-            company_name='Test Company',
-            user_id=self.user.id,
-            message=''
-        )
-
-        self.assertEqual(result['status'], 'failed')
-        self.assertIn('already a member', result['error'])
-
-
-class RequestJoinCompanyViewTests(TestCase):
-
-    def setUp(self):
-        self.client = APIClient()
-        self.user = User.objects.create_user(
-            email='user@example.com',
-            password='testPass123'
-        )
-        self.url = reverse('request-join')
-
-        self.client.force_authenticate(user=self.user)
-
-    @patch('taskflow.companies.views.create_join_request_task')
-    def test_post_request_success(self, mock_task):
-        """Test successful join request submission returns task_id"""
-        # تنظیم mock
-        mock_async_result = MagicMock(spec=AsyncResult)
-        mock_async_result.id = 'test-task-123'
-        mock_async_result.status = 'PENDING'
-        mock_task.delay.return_value = mock_async_result
 
         data = {
-            'name': 'Test Company',
-            'message': 'Please let me join'
+            'company_name': 'test company'
         }
 
+        # Act
         response = self.client.post(self.url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        self.assertIn('task_id', response.data)
-        self.assertEqual(response.data['task_id'], 'test-task-123')
-        self.assertEqual(response.data['status'], 'PENDING')
-
-        mock_task.delay.assert_called_once_with(
-            company_name='Test Company',
-            user_id=self.user.id,
-            message='Please let me join'
+        # Assert
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['error'],
+            'You are already a member of this company'
         )
 
-    def test_post_request_invalid_data(self):
-        """Test validation error when company name is missing"""
-        data = {'message': 'No company name'}
+    def test_pending_request_already_exists(self):
+        """Test user cannot request to join if they already have a pending request"""
+        # Arrange
+        self.authenticate()
 
-        response = self.client.post(self.url, data, format='json')
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertFalse(response.data['success'])
-        self.assertIn('errors', response.data)
-
-    @patch('taskflow.companies.views.create_join_request_task')
-    def test_post_request_service_error(self, mock_task):
-        """Test when service raises JoinRequestError"""
-        from taskflow.companies.services.invitation_service import InvitationService
-
-        mock_task.delay.side_effect = InvitationService.JoinRequestError(
-            "Company does not exist or is not active."
+        # Create a pending request invitation
+        Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.admin_user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='test-token-123',
+            status=Invitation.InvitationStatus.PENDING,
+            message='I want to join',
+            expires_at=timezone.now() + timedelta(days=7)
         )
 
-        data = {'name': 'Non Existent Company'}
+        data = {
+            'company_name': 'test company'
+        }
 
+        # Act
         response = self.client.post(self.url, data, format='json')
 
+        # Assert
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertFalse(response.data['success'])
+        self.assertEqual(
+            response.data['error'],
+            'You already have a pending join request'
+        )
+
+    def test_company_name_case_insensitive(self):
+        """Test that company name lookup is case insensitive"""
+        # Arrange
+        self.authenticate()
+        mock_task = MagicMock()
+        mock_task.id = 'test-task-123'
+        mock_task.status = 'PENDING'
+
+        with patch('taskflow.companies.views.create_join_request_task.delay') as mock_delay:
+            mock_delay.return_value = mock_task
+
+            # Act - use uppercase company name
+            data = {
+                'company_name': 'TEST COMPANY'
+            }
+            response = self.client.post(self.url, data, format='json')
+
+            # Assert
+            self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+            # Verify the task uses the provided name (which is in uppercase)
+            mock_delay.assert_called_once_with(
+                company_name='TEST COMPANY',
+                user_id=self.user.id,
+                message=''
+            )
+
+
+class RequestJoinCompanyViewIntegrationTest(APITestCase):
+    """
+    Integration tests that verify the complete flow with the actual Celery task
+    """
+
+    def setUp(self):
+        """Setup test data"""
+        self.user = User.objects.create_user(
+            email='test@example.com',
+            password='passTest123',
+            first_name='Test',
+            last_name='User'
+        )
+
+        self.admin_user = User.objects.create_user(
+            email='admin_integ@example.com',
+            password='passTest123',
+            first_name='Admin',
+            last_name='User'
+        )
+
+        self.company = Company.objects.create(
+            name='integtestcompany',
+            owner=self.admin_user,
+            is_active=True,
+            email='integtest@company.com'
+        )
+
+        self.admin_membership = Membership.objects.create(
+            user=self.admin_user,
+            company=self.company,
+            role=Membership.RoleChoices.ADMIN,
+        )
+
+        self.url = reverse('request-join')
+
+    def authenticate(self):
+        self.client.force_authenticate(user=self.user)
+
+    @patch('taskflow.companies.tasks.send_notification_to_admins')
+    def test_complete_flow_with_mocked_notifications(self, mock_notify):
+        """Test complete flow with mocked notification service"""
+        # Arrange
+        self.authenticate()
+        mock_notify.return_value = 1
+
+        from taskflow.companies.tasks import create_join_request_task
+
+        with patch('taskflow.companies.views.create_join_request_task.delay') as mock_delay:
+            def side_effect(*args, **kwargs):
+
+                result = create_join_request_task(*args, **kwargs)
+
+                mock_async_result = MagicMock()
+                mock_async_result.id = 'test-task-123'
+                mock_async_result.status = 'PENDING'
+
+                mock_async_result.result = result
+
+                return mock_async_result
+
+            mock_delay.side_effect = side_effect
+
+            data = {
+                'company_name': 'integtestcompany',
+                'message': 'Please accept my request'
+            }
+
+            # Act
+            response = self.client.post(self.url, data, format='json')
+
+            # Assert
+            self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+            self.assertEqual(response.data['task_id'], 'test-task-123')
+
+            # Verify the invitation was created
+            invitation_exists = Invitation.objects.filter(
+                email=self.user.email,
+                company=self.company,
+                status=Invitation.InvitationStatus.PENDING,
+                invitation_type=Invitation.InvitationType.REQUEST
+            ).exists()
+
+            self.assertTrue(invitation_exists)
+
+            # Verify admin notification was called
+            mock_notify.assert_called_once()
+
+    def test_duplicate_request_prevention(self):
+        """Test that user cannot create duplicate join requests"""
+        # Arrange
+        self.authenticate()
+
+        # Create first pending request
+        Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.admin_user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token='test-token-456',
+            status=Invitation.InvitationStatus.PENDING,
+            message='First request',
+            expires_at=timezone.now() + timedelta(days=7)
+        )
+
+        data = {
+            'company_name': 'integtestcompany'
+        }
+
+        # Act
+        response = self.client.post(self.url, data, format='json')
+
+        # Assert
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['error'],
+            'You already have a pending join request'
+        )
 
 
 class ApproveJoinRequestTests(APITestCase):
