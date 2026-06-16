@@ -4,7 +4,7 @@ from .views import (
     CompanyDetailView,
     CompanyCreateView,
     RequestJoinCompanyView,
-    ApproveJoinRequestView,
+    AcceptJoinRequestView,
     RejectJoinRequestView
 )
 
@@ -20,13 +20,13 @@ urlpatterns = [
         name='company-detail'
     ),
     path(
-        'invitation/request-join/',
+        'invitations/request/join/',
          RequestJoinCompanyView.as_view(),
         name='request-join'
     ),
     path(
-        'invitations/<int:invitation_id>/approve/',
-         ApproveJoinRequestView.as_view(),
+        'invitations/<str:token>/accept/',
+         AcceptJoinRequestView.as_view(),
         name='approve-request'
     ),
     path(
