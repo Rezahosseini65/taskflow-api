@@ -82,7 +82,7 @@ class CompanyDetailSerializer(serializers.ModelSerializer):
 
 
 class RequestJoinCompanySerializer(serializers.Serializer):
-    name = serializers.CharField(
+    company_name = serializers.CharField(
         max_length=128,
         write_only=True,
         trim_whitespace=True
@@ -94,6 +94,6 @@ class RequestJoinCompanySerializer(serializers.Serializer):
         allow_blank=True
     )
 
-    def validate_name(self, value):
+    def validate_company_name(self, value):
         self.context['company_name'] = value.strip()
         return value
