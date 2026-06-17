@@ -41,14 +41,11 @@ class CompanyCreateView(APIView):
         )
         if serializer.is_valid():
             validated_data = serializer.validated_data
-            name = serializer.validated_data.pop('name')
+            name = validated_data.pop('name')
             members = validated_data.pop('members', [])
-            slug = validated_data.pop('slug', None)
+            slug = validated_data.pop('slug')  # حالا slug در validated_data وجود دارد
 
             try:
-                if not slug:
-                    slug = slugify(validated_data['name'], allow_unicode=True)
-
                 company = Company.objects.create(
                     name=name.lower(),
                     owner=request.user,
