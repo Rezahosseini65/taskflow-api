@@ -13,15 +13,17 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from .models import Company, Membership, Invitation
-from .tasks import create_join_request_task, accept_invitation_task
+from .tasks import (
+    create_join_request_task,
+    accept_invitation_task,
+    reject_invitation_task
+)
 from .serializers import (
     CompanyDetailSerializer,
     CompanyCreateSerializer,
     RequestJoinCompanySerializer
 )
-
 from taskflow.accounts.authentication import CookieJWTAuthentication
-from .services.invitation_service import InvitationService
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +213,7 @@ class RequestJoinCompanyView(APIView):
                 'message': 'Join request is being processed asynchronously'
             }, status=status.HTTP_202_ACCEPTED)
 
-        except InvitationService.JoinRequestError as e:
+        except Exception as e:
             return Response({
                 'success': False,
                 'error': str(e) if settings.DEBUG else 'Join request failed'
@@ -297,20 +299,75 @@ class RejectJoinRequestView(APIView):
     permission_classes = [IsAuthenticated]
     authentication_classes = [CookieJWTAuthentication]
 
-    def post(self, request, invitation_id):
+    def post(self, request, token):
         reason = request.data.get('reason', '')
+
         try:
-            _ = InvitationService.reject_join_request(
-                invitation_id,
-                request.user,
+            # Execute task asynchronously
+            task = reject_invitation_task.delay(
+                token,
+                request.user.id,
                 reason
             )
-            return Response(
-                {'message': 'Join request rejected'}
-            )
+
+            return Response({
+                'status': 'processing',
+                'task_id': task.id,
+                'message': 'Join request is being processed',
+                'detail': 'Join request is being processed asynchronously',
+                'token': token
+            }, status=status.HTTP_202_ACCEPTED)
 
         except PermissionError as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_403_FORBIDDEN
-            )
+            return Response({
+                'status': 'error',
+                'error': 'permission_denied',
+                'message': 'You do not have permission to reject this request',
+                'detail': str(e)
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        except ValueError as e:
+            # Validation error (e.g., expired invitation)
+            error_message = str(e)
+
+            if 'expired' in error_message.lower():
+                return Response({
+                    'status': 'error',
+                    'error': 'invitation_expired',
+                    'message': 'The join request link has expired',
+                    'detail': error_message
+                }, status=status.HTTP_400_BAD_REQUEST)
+            elif 'already' in error_message.lower():
+                return Response({
+                    'status': 'error',
+                    'error': 'already_processed',
+                    'message': 'This request has already been processed',
+                    'detail': error_message
+                }, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                return Response({
+                    'status': 'error',
+                    'error': 'validation_error',
+                    'message': 'Invalid request data',
+                    'detail': error_message if settings.DEBUG else None
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        except Invitation.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'error': 'invitation_not_found',
+                'message': 'Join request not found',
+                'detail': 'The invitation does not exist or has been removed'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        except Exception as e:
+            # Unexpected error
+            logger.exception(f"Unexpected error in RejectJoinRequestView: {str(e)}")
+
+            return Response({
+                'status': 'error',
+                'error': 'internal_server_error',
+                'message': 'An unexpected error occurred. Please try again.',
+                'detail': str(e) if settings.DEBUG else None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
