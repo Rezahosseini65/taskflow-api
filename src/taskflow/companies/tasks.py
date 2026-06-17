@@ -1,13 +1,15 @@
 import logging
+import secrets
+from datetime import timedelta
 
 from celery import shared_task
 
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from django.core.cache import cache
 
 from .models import Company, Membership, Invitation
-from taskflow.companies.services.invitation_service import InvitationService
 from taskflow.notifications.models import Notification
 
 logger = logging.getLogger(__name__)
@@ -44,10 +46,10 @@ def create_join_request_task(self, company_name, user_id, message=None):
                 invited_user=user,
                 role=Membership.RoleChoices.MEMBER,
                 invitation_type=Invitation.InvitationType.REQUEST,
-                token=InvitationService.generate_token(),
+                token=secrets.token_urlsafe(32),
                 status=Invitation.InvitationStatus.PENDING,
                 message=message or f"{user.email} requests to join your company",
-                expires_at=InvitationService.create_expiry_date()
+                expires_at=timezone.now() + timedelta(days=7)
             )
 
             admins_notified = send_notification_to_admins(
@@ -75,15 +77,6 @@ def create_join_request_task(self, company_name, user_id, message=None):
                 'admins_notified': admins_notified,
             }
 
-    except InvitationService.JoinRequestError as e:
-        logger.warning(f"Join request validation failed: {str(e)}")
-        return {
-            'status': 'failed',
-            'error': str(e),
-            'company_name': company_name,
-            'user_email': user.email
-        }
-
     except Exception as e:
         logger.exception(f"Unexpected error in async_create_join_request: {str(e)}")
         raise self.retry(exc=e, countdown=60 * (self.request.retries + 1))
@@ -107,6 +100,8 @@ def send_notification_to_admins(company, requester_user, invitation):
         return 0
 
     notifications = []
+    admin_user_ids = []
+
     for membership in admin_memberships:
         notification = Notification(
             recipient=membership.user,
@@ -119,10 +114,21 @@ def send_notification_to_admins(company, requester_user, invitation):
             company=company,
             status=Notification.NotificationStatus.UNREAD
         )
+        logger.info(type(cache))
         notifications.append(notification)
+        admin_user_ids.append(membership.user.id)
 
     if notifications:
         Notification.objects.bulk_create(notifications)
+
+        for user_id in admin_user_ids:
+            if hasattr(cache, 'delete_pattern'):
+                cache.delete_pattern(f"notification_list_user_{user_id}_*")
+                logger.debug(f"Invalidated notification cache for admin {user_id}")
+            else:
+                cache.delete(f"notification_list_user_{user_id}")
+                logger.debug(f"Invalidated notification cache for admin {user_id}")
+
         logger.info(
             f"Sent {len(notifications)} notifications to admins of {company.name}: "
             f"{[m.user.email for m in admin_memberships]}"
@@ -203,6 +209,20 @@ def accept_invitation_task(self, token, admin_id):
                 }
             )
 
+            if hasattr(cache, 'delete_pattern'):
+                cache.delete_pattern(f"notification_list_user_{invitation.invited_user.id}_*")
+                logger.debug(f"Invalidated notification cache for admin {invitation.invited_user.id}")
+
+                cache.delete_pattern(f"notification_list_user_{admin_user.id}_*")
+                logger.debug(f"Invalidated notification cache for admin {admin_user.id}")
+
+            else:
+                cache.delete(f"notification_list_user_{invitation.invited_user.id}")
+                logger.debug(f"Invalidated notification cache for admin {invitation.invited_user.id}")
+
+                cache.delete(f"notification_list_user_{admin_user.id}")
+                logger.debug(f"Invalidated notification cache for admin {admin_user.id}")
+
             logger.info(
                 f"Join request approved: user={invitation.invited_user.email}, "
                 f"company={invitation.company.name}, admin={admin_user.email}, "
@@ -234,5 +254,129 @@ def accept_invitation_task(self, token, admin_id):
 
     except Exception as e:
         logger.exception(f"Unexpected error in accept_invitation_task: {str(e)}")
+        raise self.retry(exc=e, countdown=60 * (self.request.retries + 1))
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def reject_invitation_task(self, token, admin_id, reason=None):
+    admin_user = get_user(admin_id)
+
+    if admin_user is None:
+        return {
+            'status': 'error',
+            'error': f'Admin user with id {admin_id} does not exist'
+        }
+
+    try:
+        invitation = Invitation.objects.get(
+            token=token,
+            status=Invitation.InvitationStatus.PENDING
+        )
+    except Invitation.DoesNotExist:
+        logger.error(f"Invitation with token {token} not found or not pending")
+        return {
+            'status': 'error',
+            'error': 'Invitation not found or already processed'
+        }
+
+    is_admin = Membership.objects.filter(
+        user=admin_user,
+        company=invitation.company,
+        role__in=[Membership.RoleChoices.OWNER, Membership.RoleChoices.ADMIN]
+    ).exists()
+
+    if not is_admin:
+        logger.warning(
+            f"User {admin_user.email} is not admin of company {invitation.company.name}"
+        )
+        raise PermissionError("Only admins can reject join requests")
+
+    try:
+        with transaction.atomic():
+            invitation.status = Invitation.InvitationStatus.CANCELLED
+            invitation.save()
+
+            reject_message = f"درخواست شما برای عضویت در {invitation.company.name} توسط {admin_user.email} رد شد."
+            if reason:
+                reject_message += f" دلیل: {reason}"
+
+            notification = Notification.objects.create(
+                recipient=invitation.invited_user,
+                sender=admin_user,
+                notification_type=Notification.NotificationType.JOIN_REJECTED,
+                title=f"درخواست عضویت شما در {invitation.company.name} رد شد",
+                message=reject_message,
+                action_url=f"/companies/{invitation.company.id}/dashboard/",
+                invitation=invitation,
+                company=invitation.company,
+                status=Notification.NotificationStatus.UNREAD,
+                metadata={
+                    'rejected_by': admin_user.id,
+                    'rejected_by_email': admin_user.email,
+                    'rejected_at': timezone.now().isoformat(),
+                    'reason': reason
+                }
+            )
+
+            Notification.objects.filter(
+                recipient=admin_user,
+                invitation=invitation,
+                notification_type=Notification.NotificationType.JOIN_REQUEST,
+                status=Notification.NotificationStatus.UNREAD
+            ).update(
+                status=Notification.NotificationStatus.READ,
+                read_at=timezone.now(),
+                metadata={
+                    'auto_marked_as_read': True,
+                    'reason': 'request_rejected',
+                    'rejected_by': admin_user.id,
+                    'rejected_at': timezone.now().isoformat()
+                }
+            )
+
+            if hasattr(cache, 'delete_pattern'):
+                cache.delete_pattern(f"notification_list_user_{invitation.invited_user.id}_*")
+                logger.debug(f"Invalidated notification cache for admin {invitation.invited_user.id}")
+
+                cache.delete_pattern(f"notification_list_user_{admin_user.id}_*")
+                logger.debug(f"Invalidated notification cache for admin {admin_user.id}")
+
+            else:
+                cache.delete(f"notification_list_user_{invitation.invited_user.id}")
+                logger.debug(f"Invalidated notification cache for admin {invitation.invited_user.id}")
+
+                cache.delete(f"notification_list_user_{admin_user.id}")
+                logger.debug(f"Invalidated notification cache for admin {admin_user.id}")
+
+            logger.info(
+                f"Join request rejected: user={invitation.invited_user.email}, "
+                f"company={invitation.company.name}, admin={admin_user.email}, "
+                f"reason={reason if reason else 'No reason provided'}"
+            )
+
+            return {
+                'status': 'success',
+                'invitation_id': invitation.id,
+                'company_id': invitation.company.id,
+                'company_name': invitation.company.name,
+                'user_id': invitation.invited_user.id,
+                'user_email': invitation.invited_user.email,
+                'admin_id': admin_user.id,
+                'admin_email': admin_user.email,
+                'notification_id': notification.id,
+                'rejected_at': timezone.now().isoformat(),
+                'reason': reason
+            }
+
+    except ValueError as e:
+        logger.warning(f"Invitation error: {str(e)}")
+        return {
+            'status': 'error',
+            'error': str(e),
+            'invitation_token': token
+        }
+
+    except Exception as e:
+        logger.exception(f"Unexpected error in reject_invitation_task: {str(e)}")
         raise self.retry(exc=e, countdown=60 * (self.request.retries + 1))
 
