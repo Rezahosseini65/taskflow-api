@@ -1,4 +1,5 @@
 from django.db.models import Exists, OuterRef
+from django.utils.text import slugify
 
 from rest_framework import serializers
 
@@ -28,11 +29,29 @@ class CompanyCreateSerializer(serializers.ModelSerializer):
             'logo': {'required': False},
         }
 
-    def validate_slug(self, value):
-        if Company.objects.filter(slug=value).exists():
-            raise serializers.ValidationError("A company with this slug already exists.")
+    def validate(self, data):
+        """
+        Check that the company name and slug are unique.
+        """
+        name = data.get('name')
+        slug = data.get('slug')
 
-        return value
+        if not slug:
+            slug = slugify(name, allow_unicode=True)
+
+        if Company.objects.filter(name__iexact=name).exists():
+            raise serializers.ValidationError({
+                "name": "A company with this name already exists."
+            })
+
+        if Company.objects.filter(slug=slug).exists():
+            raise serializers.ValidationError({
+                "slug": "A company with this slug already exists."
+            })
+
+        data['slug'] = slug
+
+        return data
 
 
 class UserSimpleSerializer(serializers.ModelSerializer):
