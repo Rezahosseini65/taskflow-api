@@ -30,7 +30,7 @@ urlpatterns = [
         name='approve-request'
     ),
     path(
-        'invitations/<int:invitation_id>/reject/',
+        'invitations/<str:token>/reject/',
          RejectJoinRequestView.as_view(),
         name='reject-request'
     ),
