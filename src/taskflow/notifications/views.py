@@ -25,6 +25,8 @@ class NotificationListView(APIView):
     authentication_classes = [CookieJWTAuthentication]
 
     def get_cache_key(self, request):
+        user_id = request.user.id
+
         query_params = request.query_params.dict()
 
         query_params['page'] = request.query_params.get('page', 1)
@@ -33,7 +35,9 @@ class NotificationListView(APIView):
         sorted_params = sorted(query_params.items())
 
         params_str = json.dumps(sorted_params, sort_keys=True)
-        cache_key = f"notification_list_{md5(params_str.encode()).hexdigest()}"
+
+        params_hash = md5(params_str.encode()).hexdigest()
+        cache_key = f"notification_list_user_{user_id}_{params_hash}"
 
         return cache_key
 
