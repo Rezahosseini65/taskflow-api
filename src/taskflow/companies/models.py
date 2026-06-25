@@ -144,6 +144,7 @@ class Invitation(models.Model):
         EMAIL = 'email', _('Email Invitation')
         DIRECT = 'direct', _('Direct Invitation')
         REQUEST = 'request', _('Join Request')
+        MEMBER_INVITE = 'member_invite', _('Member Invite')
 
     email = models.EmailField(_('email'))
     company = models.ForeignKey(
@@ -174,7 +175,7 @@ class Invitation(models.Model):
     )
     invitation_type = models.CharField(
         _('invitation type'),
-        max_length=10,
+        max_length=14,
         choices=InvitationType.choices,
         default=InvitationType.EMAIL
     )
