@@ -380,3 +380,89 @@ def reject_invitation_task(self, token, admin_id, reason=None):
         logger.exception(f"Unexpected error in reject_invitation_task: {str(e)}")
         raise self.retry(exc=e, countdown=60 * (self.request.retries + 1))
 
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def create_member_invitation_task(self, company_id, invited_user_id, inviter_id, role=Membership.RoleChoices.MEMBER):
+    try:
+        company = Company.objects.get(
+            id=company_id,
+            is_active=True
+        )
+    except Company.DoesNotExist:
+        logger.error(f'Company with company-id {company_id} not found')
+        return {
+            'status': 'error',
+            'error': 'Company not found or not active '
+        }
+
+    try:
+        invited_user = get_user(invited_user_id)
+        inviter = get_user(inviter_id)
+
+        if not invited_user or not inviter:
+            logger.error(
+                f'Invited user with id {invited_user_id} \
+                or Inviter with id {inviter_id} not found '
+            )
+            return {
+                'status': 'error',
+                'error': 'User not found'
+            }
+
+        with transaction.atomic():
+
+            invitation = Invitation.objects.create(
+                email=invited_user.email,
+                company=company,
+                invited_by=inviter,
+                invited_user=invited_user,
+                role=role,
+                invitation_type=Invitation.InvitationType.MEMBER_INVITE,
+                token=secrets.token_urlsafe(32),
+                status=Invitation.InvitationStatus.PENDING,
+                message=f"{inviter.email} invites you to join {company.name}",
+                expires_at=timezone.now() + timedelta(days=7)
+            )
+
+            notification = Notification.objects.create(
+                recipient=invited_user,
+                sender=inviter,
+                notification_type=Notification.NotificationType.INVITATION,
+                title=f"دعوت به عضویت در {company.name}",
+                message=f"{inviter.email} شما را به عضویت در {company.name} دعوت کرده است.",
+                action_url=f"/invitations/accept/{invitation.token}/",
+                invitation=invitation,
+                company=company,
+                status=Notification.NotificationStatus.UNREAD,
+                metadata={
+                    'invitation_type': 'member_invite',
+                    'invited_by': inviter.id,
+                    'invited_by_email': inviter.email,
+                    'role': role
+                }
+            )
+
+            cache.delete(f'notification_list_user_{invitation.invited_user.id}')
+
+            logger.info(
+                f"Member invitation created: inviter={inviter.email}, "
+                f"invited={invited_user.email}, company={company.name}"
+            )
+
+            return {
+                'status': 'success',
+                'invitation_id': invitation.id,
+                'company_id': company.id,
+                'company_name': company.name,
+                'invited_user_id': invited_user.id,
+                'invited_user_email': invited_user.email,
+                'inviter_id': inviter.id,
+                'inviter_email': inviter.email,
+                'role': role,
+                'expires_at': invitation.expires_at.isoformat(),
+                'notification_id': notification.id
+            }
+
+    except Exception as e:
+        logger.exception(f"Error in create_member_invitation_task: {str(e)}")
+        raise self.retry(exc=e, countdown=60 * (self.request.retries + 1))
