@@ -2,8 +2,7 @@ import logging
 
 from django.db.models import Q, Exists, OuterRef
 from django.core.cache import cache
-from django.db import transaction
-from django.utils.text import slugify
+from django.db import transaction, IntegrityError, DatabaseError
 from django.conf import settings
 
 from rest_framework.generics import get_object_or_404
@@ -16,12 +15,14 @@ from .models import Company, Membership, Invitation
 from .tasks import (
     create_join_request_task,
     accept_invitation_task,
-    reject_invitation_task
+    reject_invitation_task,
+    create_member_invitation_task
 )
 from .serializers import (
     CompanyDetailSerializer,
     CompanyCreateSerializer,
-    RequestJoinCompanySerializer
+    RequestJoinCompanySerializer,
+    SendMemberInvitationSerializer
 )
 from taskflow.accounts.authentication import CookieJWTAuthentication
 
@@ -368,3 +369,98 @@ class RejectJoinRequestView(APIView):
                 'detail': str(e) if settings.DEBUG else None
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+class SendMemberInvitationView(APIView):
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieJWTAuthentication]
+
+    def post(self, request, company_id):
+
+        try:
+            company = Company.objects.select_related('owner').only(
+                'id', 'name', 'is_active', 'owner_id',
+                'owner__id', 'owner__email'
+            ).get(id=company_id, is_active=True)
+
+        except Company.DoesNotExist as e:
+            logger.warning(f"Company {company_id} not found: {e}")
+            return Response(
+                {'error': 'Company not found or inactive'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if not Membership.objects.filter(
+                user=request.user,
+                company=company,
+                role__in=[Membership.RoleChoices.ADMIN, Membership.RoleChoices.OWNER]
+        ).only('id').exists():
+            logger.warning(f"User {request.user.id} tried to invite without permission")
+            return Response(
+                {'error': 'You do not have permission to invite members'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = SendMemberInvitationSerializer(
+            data=request.data,
+            context={
+                'company': company,
+                'inviter': request.user
+            }
+        )
+
+        if not serializer.is_valid():
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        invited_user = serializer.context.get('invited_user')
+        role = serializer.validated_data.get(
+            'role',
+            Membership.RoleChoices.MEMBER
+        )
+
+        try:
+            task = create_member_invitation_task.delay(
+                company_id=company.id,
+                invited_user_id=invited_user.id,
+                inviter_id=request.user.id,
+                role=role
+            )
+
+            return Response({
+                'status': 'processing',
+                'task_id': task.id,
+                'message': 'Send member invitation is being processed',
+                'detail': 'Send member invitation is being processed asynchronously',
+            }, status=status.HTTP_201_CREATED)
+
+        except IntegrityError as e:
+            logger.error(f"Integrity error: {e}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Database integrity error',
+                    'code': 'INTEGRITY_ERROR'
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        except DatabaseError as e:
+            logger.error(f"Database error: {e}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Database error occurred',
+                    'code': 'DATABASE_ERROR'
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to create task: {e}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Failed to send invitation',
+                    'code': 'TASK_FAILED'
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
