@@ -3,7 +3,7 @@ from django.utils.text import slugify
 
 from rest_framework import serializers
 
-from .models import Company, Membership
+from .models import Company, Membership, Invitation
 from taskflow.accounts.models import CustomUser
 
 
@@ -116,3 +116,62 @@ class RequestJoinCompanySerializer(serializers.Serializer):
     def validate_company_name(self, value):
         self.context['company_name'] = value.strip()
         return value
+
+
+class SendMemberInvitationSerializer(serializers.Serializer):
+    user_email = serializers.EmailField(
+        required=True,
+    )
+    role = serializers.ChoiceField(
+        choices=Membership.RoleChoices.choices,
+        default=Membership.RoleChoices.MEMBER
+    )
+
+    def validate(self, data):
+        company = self.context.get('company')
+
+        user_email = data.get('user_email')
+
+        invited_user = CustomUser.objects.filter(
+            email=user_email,
+            is_active=True
+        ).annotate(
+            is_member=Exists(
+                Membership.objects.filter(
+                    user_id=OuterRef('id'),
+                    company=company,
+                )
+            ),
+            has_pending_invitation=Exists(
+                Invitation.objects.filter(
+                    invited_user_id=OuterRef('id'),
+                    company=company,
+                    status=Invitation.InvitationStatus.PENDING
+                )
+            )
+        ).only('id', 'email', 'is_active').first()
+
+        if not invited_user:
+            raise serializers.ValidationError(
+                f"No user found with email: {user_email}"
+            )
+
+        self.context['invited_user'] = invited_user
+
+        if invited_user.is_member:
+            raise serializers.ValidationError(
+                f"{invited_user.email} is already a member"
+            )
+
+        if invited_user.has_pending_invitation:
+            raise serializers.ValidationError(
+                f"An invitation already exists for {invited_user.email}"
+            )
+
+        inviter = self.context.get('inviter')
+        if inviter and invited_user.id == inviter.id:
+            raise serializers.ValidationError(
+                "You cannot invite yourself to the company"
+            )
+
+        return data
