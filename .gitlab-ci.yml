@@ -1,7 +1,11 @@
 stages:
-  -hello
+  - info
 
-hello_job:
-  stage:hello
+info_job:
+  stage: info
   script:
-    -echo "Hello From Gitlab CI"
+    - echo "Hello CI"
+    - pwd
+    - ls -la
+    - whoami
+    - uname -a
