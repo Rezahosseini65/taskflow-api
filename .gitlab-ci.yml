@@ -1,7 +1,7 @@
 stages:
-  -hello
+  - hello
 
 hello_job:
-  stage:hello
+  stage: hello
   script:
-    -echo "Hello From Gitlab CI"
+    - echo "Hello From Gitlab CI"
