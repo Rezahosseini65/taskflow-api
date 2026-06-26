@@ -1,7 +1,6 @@
 stages:
-<<<<<<< HEAD
   - info
-
+  
 info_job:
   stage: info
   script:
@@ -10,11 +9,4 @@ info_job:
     - ls -la
     - whoami
     - uname -a
-=======
-  - hello
 
-hello_job:
-  stage: hello
-  script:
-    - echo "Hello From Gitlab CI"
->>>>>>> 6b7e11934321fe682224d2a12d23cd997879df9a
