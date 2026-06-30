@@ -1,12 +1,48 @@
 stages:
-  - info
-  
-info_job:
-  stage: info
+  - test
+
+variables:
+  DJANGO_SETTINGS_MODULE: "taskflow.settings.development"
+
+  POSTGRES_DB: "taskflow"
+  POSTGRES_USER: "taskflow"
+  POSTGRES_PASSWORD: "taskflow"
+
+  POETRY_VIRTUALENVS_IN_PROJECT: "true"
+  POETRY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pypoetry"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+cache:
+  key:
+    files:
+      - poetry.lock
+
+  paths:
+    - .cache/pip
+    - .cache/pypoetry
+
+  policy: pull-push
+
+before_script:
+  - echo "$DOTENV_CONTENT" > src/taskflow/.env
+  - pip install poetry==1.8.5
+  - poetry install --no-interaction --no-ansi
+
+test_job:
+  stage: test
+
+  image: python:3.12
+
+  services:
+    - name: postgres:16
+      alias: db
+
+    - name: redis:7
+      alias: redis
+
   script:
-    - echo "Hello CI"
-    - pwd
-    - ls -la
-    - whoami
-    - uname -a
+    - poetry run python src/manage.py test
 
