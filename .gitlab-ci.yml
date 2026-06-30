@@ -44,5 +44,8 @@ test_job:
       alias: redis
 
   script:
+    - pwd
+    - ls -la
+    - ls -la src
     - poetry run python src/manage.py test
 
