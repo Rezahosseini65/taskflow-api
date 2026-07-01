@@ -13,9 +13,6 @@ variables:
  
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
 
-  CELERY_BROKER_URL: 'amqp://guest:guest@rabbitmq:5672//'
-  CELERY_RESULT_BACKEND: 'django-db'
-
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONUNBUFFERED: "1"
 
@@ -47,11 +44,9 @@ test_job:
     - name: redis:7
       alias: redis
 
-    - name: rabbitmq:alpine
-      alias: rabbitmq
-
   script:
-    - poetry run celery -A taskflow worker --loglevel=info --concurrency=1 &  
-    - sleep 5
-    - poetry run python src/manage.py test
+    - pwd
+    - find src -name "tests.py"
+    - poetry run python src/manage.py test --verbosity=2
+    
 
