@@ -16,6 +16,8 @@ variables:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONUNBUFFERED: "1"
 
+  PYTHONPATH: "$CI_PROJECT_DIR/src"
+
 cache:
   key:
     files:
@@ -45,8 +47,7 @@ test_job:
       alias: redis
 
   script:
-    - pwd
-    - find src -name "tests.py"
-    - poetry run python src/manage.py test --verbosity=2 --pattern="tests.py"
-    
-
+    - poetry run python -c "import taskflow; print(taskflow.__path__)"
+    - poetry run python src/manage.py shell -c "from django.apps import apps; print([a.name for a in apps.get_app_configs()])"
+    - poetry run python src/manage.py test taskflow.accounts --verbosity=2
+    - poetry run python src/manage.py test --verbosity=2
