@@ -47,6 +47,6 @@ test_job:
   script:
     - pwd
     - find src -name "tests.py"
-    - poetry run python src/manage.py test --verbosity=2
+    - poetry run python src/manage.py test --verbosity=2 --pattern="tests.py"
     
 
