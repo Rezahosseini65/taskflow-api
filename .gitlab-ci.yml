@@ -47,7 +47,4 @@ test_job:
       alias: redis
 
   script:
-    - poetry run python -c "import taskflow; print(taskflow.__path__)"
-    - poetry run python src/manage.py shell -c "from django.apps import apps; print([a.name for a in apps.get_app_configs()])"
-    - poetry run python src/manage.py test taskflow.accounts --verbosity=2
     - poetry run python src/manage.py test taskflow --verbosity=2 
