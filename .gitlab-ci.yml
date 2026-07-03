@@ -17,6 +17,9 @@ variables:
   PYTHONUNBUFFERED: "1"
 
   PYTHONPATH: "$CI_PROJECT_DIR/src"
+  
+  CELERY_BROKER_URL: 'amqp://guest:guest@rabbitmq:5672//'
+  CELERY_RESULT_BACKEND: 'django-db'
 
 cache:
   key:
@@ -46,5 +49,10 @@ test_job:
     - name: redis:7
       alias: redis
 
+    - name: rabbitmq:alpine
+      alias: rabbitmq
+
   script:
+    - poetry run celery -A taskflow worker --loglevel=info &
+    - sleep 10
     - poetry run python src/manage.py test taskflow --verbosity=2 
