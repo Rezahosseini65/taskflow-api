@@ -4,55 +4,160 @@ stages:
 variables:
   DJANGO_SETTINGS_MODULE: "taskflow.settings.development"
 
-  POSTGRES_DB: "taskflow"
+  # متغیرهای دیتابیس برای Django
+  DB_NAME: "taskflow_test"
+  DB_USER: "taskflow"
+  DB_PASSWORD: "taskflow"
+  DB_HOST: "db"  # نام سرویس postgres
+  DB_PORT: "5432"
+
+  # متغیرهای PostgreSQL برای سرویس
+  POSTGRES_DB: "taskflow_test"
   POSTGRES_USER: "taskflow"
   POSTGRES_PASSWORD: "taskflow"
+  POSTGRES_HOST_AUTH_METHOD: "trust"
 
+  # Poetry
   POETRY_VIRTUALENVS_IN_PROJECT: "true"
   POETRY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pypoetry"
- 
-  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
 
+  # Pip
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+  # Python
   PYTHONUNBUFFERED: "1"
 
-  PYTHONPATH: "$CI_PROJECT_DIR/src"
-  
+  # Celery
   CELERY_BROKER_URL: 'amqp://guest:guest@rabbitmq:5672//'
   CELERY_RESULT_BACKEND: 'django-db'
+
+  # مسیرهای پروژه
+  PYTHONPATH: "$CI_PROJECT_DIR/src"
 
 cache:
   key:
     files:
       - poetry.lock
-
   paths:
     - .cache/pip
     - .cache/pypoetry
-
+    - .venv
   policy: pull-push
 
 before_script:
-  - echo "$DOTENV_CONTENT" > src/taskflow/.env
+  # نصب Poetry
   - pip install poetry==1.8.5
-  - poetry install --no-interaction --no-ansi
+
+  # نصب وابستگی‌ها
+  - poetry install --no-interaction --no-ansi --no-root
+
+  # ایجاد فایل .env
+  - echo "$DOTENV_CONTENT" > src/taskflow/.env
+
+  # ایجاد فایل .env برای تست
+  - |
+    cat > src/taskflow/.env.test << EOF
+    DB_NAME=taskflow_test
+    DB_USER=taskflow
+    DB_PASSWORD=taskflow
+    DB_HOST=db
+    DB_PORT=5432
+    CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+    CELERY_RESULT_BACKEND=django-db
+    EOF
 
 test_job:
   stage: test
-
   image: python:3.12
 
   services:
-    - name: postgres:16
+    - name: postgres:16-alpine
       alias: db
+      variables:
+        POSTGRES_DB: taskflow_test
+        POSTGRES_USER: taskflow
+        POSTGRES_PASSWORD: taskflow
+        POSTGRES_HOST_AUTH_METHOD: trust
 
-    - name: redis:7
+    - name: redis:7-alpine
       alias: redis
 
-    - name: rabbitmq:alpine
+    - name: rabbitmq:3-alpine
       alias: rabbitmq
 
   script:
-    - poetry run celery -A taskflow worker --loglevel=info &
+    # منتظر آماده شدن سرویس‌ها
+    - echo "Waiting for PostgreSQL..."
+    - poetry run python -c "import time; time.sleep(5)"
+
+    # بررسی اتصال به PostgreSQL
+    - |
+      until poetry run python -c "
+      import psycopg2
+      try:
+        conn = psycopg2.connect(
+          dbname='taskflow_test',
+          user='taskflow',
+          password='taskflow',
+          host='db',
+          port='5432'
+        )
+        conn.close()
+        print('PostgreSQL is ready!')
+      except Exception as e:
+        print(f'Waiting for PostgreSQL: {e}')
+        raise SystemExit(1)
+      "; do
+        echo "Waiting for PostgreSQL to be ready..."
+        sleep 2
+      done
+
+    # منتظر Redis
+    - |
+      until poetry run python -c "
+      import redis
+      try:
+        r = redis.Redis(host='redis', port=6379, db=0)
+        r.ping()
+        print('Redis is ready!')
+      except Exception as e:
+        print(f'Waiting for Redis: {e}')
+        raise SystemExit(1)
+      "; do
+        echo "Waiting for Redis to be ready..."
+        sleep 2
+      done
+
+    # اجرای Celery در پس‌زمینه
+    - poetry run celery -A taskflow worker --loglevel=info --detach
+
+    # منتظر Celery
     - sleep 10
-    - poetry run python src/manage.py test taskflow --verbosity=2 
+
+    # اجرای تست‌ها با تنظیمات تست
+    - poetry run python src/manage.py test taskflow --verbosity=2 --noinput
+
+    # یا اگر می‌خواهید با تنظیمات تست مخصوص اجرا کنید
+    - |
+      poetry run python src/manage.py test taskflow --verbosity=2 --noinput --settings=taskflow.settings.test
+
+  # تنظیمات زمان‌بندی
+  timeout: 30 minutes
+
+  # فقط در صورت نیاز
+  only:
+    - main
+    - develop
+    - merge_requests
+
+  # متغیرهای اضافی برای تست
+  variables:
+    DJANGO_SETTINGS_MODULE: "taskflow.settings.test"
+
+  artifacts:
+    when: always
+    paths:
+      - test-reports/
+    reports:
+      junit: test-reports/*.xml
