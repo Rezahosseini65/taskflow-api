@@ -7,13 +7,13 @@ from django.urls import reverse
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
 
 from .models import CustomUser
 
 
-class UserRegisterViewTestCase(APITestCase):
+class UserRegisterViewTestCase(TransactionTestCase):
 
     def setUp(self):
         from .views import UserRegisterView
@@ -32,6 +32,11 @@ class UserRegisterViewTestCase(APITestCase):
             "password": "StrongPassword123",
             "confirm_password": "StrongPassword123"
         }
+
+    @classmethod
+    def tearDownClass(cls):
+        connections.close_all()
+        super().tearDownClass()
 
     def test_registration_success(self):
         start = time.time()
@@ -55,27 +60,44 @@ class UserRegisterViewTestCase(APITestCase):
     def test_concurrency_registration(self):
         num_requests = 10
 
+        def register():
+            client = APIClient()
+            try:
+                return client.post(
+                    self.register_url,
+                    self.concurrent_data,
+                    format="json"
+                )
+            finally:
+                # بستن connection مربوط به همین Thread
+                connections.close_all()
+
         with ThreadPoolExecutor(max_workers=num_requests) as executor:
-            futures = [executor.submit(self.client.post, self.register_url, self.concurrent_data, format='json') for _
-                       in range(num_requests)]
+            futures = [executor.submit(register) for _ in range(num_requests)]
 
             success_count = 0
             fail_count = 0
 
             for future in futures:
                 response = future.result()
+
                 if response.status_code == status.HTTP_201_CREATED:
                     success_count += 1
                 elif response.status_code == status.HTTP_400_BAD_REQUEST:
                     fail_count += 1
                 else:
-                    fail_count += 1
                     self.fail(f"Unexpected status code: {response.status_code}")
 
-        user_count = CustomUser.objects.filter(email=self.concurrent_email).count()
-        self.assertEqual(user_count, 1, "Exactly one user should be created.")
-        self.assertEqual(success_count, 1, "Only one registration should succeed.")
-        self.assertEqual(fail_count, num_requests - 1, "Other registrations should fail due to duplicate email.")
+        # بستن connection مربوط به Thread اصلی
+        connections.close_all()
+
+        user_count = CustomUser.objects.filter(
+            email=self.concurrent_email
+        ).count()
+
+        self.assertEqual(user_count, 1)
+        self.assertEqual(success_count, 1)
+        self.assertEqual(fail_count, num_requests - 1)
 
         user = CustomUser.objects.get(email=self.concurrent_email)
         self.assertTrue(user.password.startswith("pbkdf2_sha256$"))
