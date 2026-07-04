@@ -49,7 +49,7 @@ test_job:
     - name: redis:7
       alias: redis
 
-    - name: rabbitmq:alpine
+    - name: rabbitmq:3.12-management-alpine
       alias: rabbitmq
 
   script:
