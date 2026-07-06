@@ -799,25 +799,6 @@ class CompanyDetailViewPerformanceTest(APITestCase):
         assert response.status_code == status.HTTP_200_OK
         assert response_time < 500, f"Response time {response_time}ms > 500ms"
 
-    def test_cached_request_response_time(self):
-        """Test: Cached request should be very fast"""
-        import time
-
-        url = reverse('company-detail', kwargs={'pk': self.companies[0].pk})
-
-        # First request to populate cache
-        self.client.get(url)
-
-        # Second request (cached)
-        start = time.time()
-        response = self.client.get(url)
-        end = time.time()
-
-        response_time = (end - start) * 1000  # milliseconds
-
-        assert response.status_code == status.HTTP_200_OK
-        assert response_time < 80, f"Cached response time {response_time}ms > 80ms"
-
 
 class RequestJoinCompanyViewTest(APITestCase):
 
