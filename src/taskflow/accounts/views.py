@@ -1,7 +1,7 @@
 import logging
 
 from django.conf import settings
-from django.db import transaction
+from django.db import transaction, IntegrityError
 
 from rest_framework.views import APIView
 from rest_framework import status
@@ -63,6 +63,17 @@ class UserRegisterView(APIView):
                     TokenCookieManager.set_refresh_cookie(response, refresh_token)
 
                     return response
+
+                except IntegrityError:
+                    return Response(
+                        {
+                            "email": [
+                                "This email address is already in use. Please use another one."
+                            ]
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
 
                 except Exception as e:
                     logger.error(f"User registration failed: {str(e)}", exc_info=True)
