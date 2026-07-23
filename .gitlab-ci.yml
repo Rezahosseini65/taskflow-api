@@ -33,13 +33,11 @@ cache:
   policy: pull-push
 
 before_script:
-  - pwd
-  - find src/taskflow/boards/migrations -maxdepth 1 -type f
-  - git rev-parse HEAD
-  - git status
+  - echo "$DOTENV_CONTENT" > src/taskflow/.env
+  - pip install poetry==1.8.5
   - poetry install --no-interaction --no-ansi
-  - poetry run python src/manage.py showmigrations boards
   - poetry run python src/manage.py makemigrations --check --dry-run
+  - poetry run python src/manage.py migrate
 
 test_job:
   stage: test
