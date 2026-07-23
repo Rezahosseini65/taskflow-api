@@ -95,10 +95,12 @@ class Board(models.Model):
 
         ordering = ['-created_at']
 
-        models.UniqueConstraint(
-            fields=['company', 'name'],
-            name='unique_board_name_per_company'
-        )
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company", "name"],
+                name="unique_board_name_per_company",
+            )
+        ]
 
         indexes = [
             models.Index(fields=['company']),
@@ -109,9 +111,9 @@ class Board(models.Model):
 
 class BoardMembership(models.Model):
     class RoleChoices(models.TextChoices):
-        ADMIN = 'Admin', _('admin')
-        MEMBER = 'Membership', _('membership')
-        VIEWER = 'Viewer', _('viewer')
+        ADMIN = "admin", _("Admin")
+        MEMBER = "member", _("Member")
+        VIEWER = "viewer", _("Viewer")
 
     board = models.ForeignKey(
         Board,
