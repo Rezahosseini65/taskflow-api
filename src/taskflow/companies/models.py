@@ -230,7 +230,7 @@ class Invitation(models.Model):
         self.invited_user = user
         self.save()
 
-        return membership
+        return membership, created
 
     def cancel(self):
         """Cancel invitation"""
