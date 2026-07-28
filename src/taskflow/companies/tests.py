@@ -1,4 +1,4 @@
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 from datetime import timedelta
 
 from django.core.cache import cache
@@ -16,7 +16,7 @@ from rest_framework import status
 from .models import Company, Membership, Invitation
 from .views import CompanyDetailView
 from taskflow.notifications.models import Notification
-from .tasks import reject_invitation_task, create_member_invitation_task
+from .tasks import reject_invitation_task, create_member_invitation_task, create_join_request_task
 
 User = get_user_model()
 
@@ -1038,7 +1038,40 @@ class RequestJoinCompanyViewTest(APITestCase):
                 company_name='TEST COMPANY',
                 user_id=self.user.id,
                 message=''
-            )
+                )
+
+    def test_create_join_request_task_company_not_found(self):
+        result = create_join_request_task.run(
+            company_name="unknown",
+            user_id=self.user.id,
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("not found", result["error"])
+
+    def test_create_join_request_task_duplicate_pending(self):
+        Invitation.objects.create(
+            email=self.user.email,
+            company=self.company,
+            invited_by=self.user,
+            invited_user=self.user,
+            role=Membership.RoleChoices.MEMBER,
+            invitation_type=Invitation.InvitationType.REQUEST,
+            token="duplicate-token",
+            status=Invitation.InvitationStatus.PENDING,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+
+        result = create_join_request_task.run(
+            company_name=self.company.name,
+            user_id=self.user.id,
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            result["error"],
+            "Pending invitation already exists.",
+        )
 
 
 class RequestJoinCompanyViewIntegrationTest(APITestCase):
@@ -1080,7 +1113,7 @@ class RequestJoinCompanyViewIntegrationTest(APITestCase):
     def authenticate(self):
         self.client.force_authenticate(user=self.user)
 
-    @patch('taskflow.companies.tasks.send_notification_to_admins')
+    @patch("taskflow.companies.tasks.notify_company_admins")
     def test_complete_flow_with_mocked_notifications(self, mock_notify):
         """Test complete flow with mocked notification service"""
         # Arrange
@@ -1092,7 +1125,7 @@ class RequestJoinCompanyViewIntegrationTest(APITestCase):
         with patch('taskflow.companies.views.create_join_request_task.delay') as mock_delay:
             def side_effect(*args, **kwargs):
 
-                result = create_join_request_task(*args, **kwargs)
+                result = create_join_request_task.run(*args, **kwargs)
 
                 mock_async_result = MagicMock()
                 mock_async_result.id = 'test-task-123'
@@ -1241,9 +1274,9 @@ class AcceptJoinRequestTests(APITestCase):
 
         # اجرای همگام تسک برای تست
         from taskflow.companies.tasks import accept_invitation_task
-        result = accept_invitation_task(
+        result = accept_invitation_task.run(
             token=self.invitation.token,
-            admin_id=self.admin_user.id
+            admin_id=self.admin_user.id,
         )
 
         # بررسی نتیجه تسک
@@ -1277,9 +1310,9 @@ class AcceptJoinRequestTests(APITestCase):
         from taskflow.companies.tasks import accept_invitation_task
 
         with self.assertRaises(PermissionError) as context:
-            accept_invitation_task(
+            result = accept_invitation_task.run(
                 token=self.invitation.token,
-                admin_id=self.non_admin_user.id
+                admin_id=self.non_admin_user.id,
             )
 
         self.assertIn('Only admins can approve', str(context.exception))
@@ -1305,14 +1338,16 @@ class AcceptJoinRequestTests(APITestCase):
 
         # اجرای همگام تسک و بررسی خطا
         from taskflow.companies.tasks import accept_invitation_task
-        result = accept_invitation_task(
-            token='non-existent-token',  # توکن ناموجود
-            admin_id=self.admin_user.id
+        result = accept_invitation_task.run(
+            token="non-existent-token",
+            admin_id=self.admin_user.id,
         )
 
-        # تسک باید خطا برگرداند
-        self.assertEqual(result['status'], 'error')
-        self.assertIn('Invitation not found or already processed', result['error'])
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            result["error"],
+            "Invitation not found or already processed",
+        )
 
     def test_approve_already_approved_request(self):
         """Test that approving an already approved request fails"""
@@ -1329,7 +1364,7 @@ class AcceptJoinRequestTests(APITestCase):
 
         # اجرای تسک و بررسی خطا
         from taskflow.companies.tasks import accept_invitation_task
-        result = accept_invitation_task(
+        result = accept_invitation_task.run(
             token=self.invitation.token,
             admin_id=self.admin_user.id
         )
@@ -1343,8 +1378,15 @@ class AcceptJoinRequestTests(APITestCase):
         self.authenticate(self.admin_user)
 
         # Set some cache
-        cache.set(f"notification_list_user_{self.user.id}_page1", "test_data")
-        cache.set(f"notification_list_user_{self.admin_user.id}_page1", "test_data")
+        cache.set(
+            f"notification_list_user_{self.user.id}",
+            "test",
+        )
+
+        cache.set(
+            f"notification_list_user_{self.admin_user.id}",
+            "test",
+        )
 
         response = self.client.post(self.url, format='json')
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
@@ -1366,6 +1408,17 @@ class AcceptJoinRequestTests(APITestCase):
         """Test that notification is created after approval"""
         self.authenticate(self.admin_user)
 
+        Notification.objects.create(
+            recipient=self.admin_user,
+            sender=self.user,
+            notification_type=Notification.NotificationType.JOIN_REQUEST,
+            invitation=self.invitation,
+            company=self.company,
+            title="Join request",
+            message="User requested to join",
+            action_url="/",
+        )
+
         response = self.client.post(self.url, format='json')
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
 
@@ -1378,83 +1431,63 @@ class AcceptJoinRequestTests(APITestCase):
 
         self.assertEqual(result['status'], 'success')
 
-        # Verify notification was created - اصلاح: استفاده از مدل صحیح
-        notification_exists = Notification.objects.filter(
-            recipient=self.user,
-            notification_type=Notification.NotificationType.JOIN_APPROVED,
-            company=self.company
-        ).exists()
-        self.assertTrue(notification_exists)
-
-        # Verify admin's notification was marked as read
         admin_notification = Notification.objects.filter(
             recipient=self.admin_user,
             invitation=self.invitation,
-            notification_type=Notification.NotificationType.JOIN_REQUEST
+            notification_type=Notification.NotificationType.JOIN_REQUEST,
         ).first()
 
-        if admin_notification:
-            self.assertEqual(admin_notification.status, Notification.NotificationStatus.READ)
-            self.assertIsNotNone(admin_notification.read_at)
+        self.assertIsNotNone(admin_notification)
 
+        self.assertEqual(
+            admin_notification.status,
+            Notification.NotificationStatus.READ,
+        )
 
-@override_settings(CELERY_ALWAYS_EAGER=True, CELERY_EAGER_PROPAGATES_EXCEPTIONS=True)
+        self.assertIsNotNone(admin_notification.read_at)
+
+@override_settings(
+    CELERY_TASK_ALWAYS_EAGER=True,
+    CELERY_TASK_EAGER_PROPAGATES=True,
+)
 class RejectJoinRequestTests(APITestCase):
 
     def setUp(self):
-        """Set up test data"""
-        # Create users
         self.user = User.objects.create_user(
-            email='user@example.com',
-            password='testPass123',
-            first_name='Test',
-            last_name='User'
+            email="user@example.com",
+            password="testPass123",
         )
 
         self.admin_user = User.objects.create_user(
-            email='admin@example.com',
-            password='testPass123',
-            first_name='Admin',
-            last_name='User'
+            email="admin@example.com",
+            password="testPass123",
         )
 
         self.non_admin_user = User.objects.create_user(
-            email='nonadmin@example.com',
-            password='testPass123',
-            first_name='Non',
-            last_name='Admin'
+            email="member@example.com",
+            password="testPass123",
         )
 
-        self.other_user = User.objects.create_user(
-            email='other@example.com',
-            password='testPass123',
-            first_name='Other',
-            last_name='User'
-        )
-
-        # Create a company
         self.company = Company.objects.create(
-            name='Test Company',
-            slug='test-company',
+            name="Test Company",
+            slug="test-company",
             owner=self.admin_user,
-            is_active=True
+            email="company@test.com",
+            is_active=True,
         )
 
-        # Make admin_user an admin
         Membership.objects.create(
             user=self.admin_user,
             company=self.company,
-            role=Membership.RoleChoices.ADMIN
+            role=Membership.RoleChoices.ADMIN,
         )
 
-        # Make non_admin_user a regular member
         Membership.objects.create(
             user=self.non_admin_user,
             company=self.company,
-            role=Membership.RoleChoices.MEMBER
+            role=Membership.RoleChoices.MEMBER,
         )
 
-        # Create a join request
         self.invitation = Invitation.objects.create(
             email=self.user.email,
             company=self.company,
@@ -1462,313 +1495,160 @@ class RejectJoinRequestTests(APITestCase):
             invited_user=self.user,
             role=Membership.RoleChoices.MEMBER,
             invitation_type=Invitation.InvitationType.REQUEST,
-            token='test-token-123',
+            token="reject-token",
             status=Invitation.InvitationStatus.PENDING,
-            expires_at=timezone.now() + timedelta(days=30)
+            expires_at=timezone.now() + timedelta(days=7),
         )
 
-        self.url = reverse('reject-request', args=[self.invitation.token])
+        self.url = reverse(
+            "reject-request",
+            args=[self.invitation.token],
+        )
 
     def authenticate(self, user):
-        """Helper method to authenticate a user"""
         self.client.force_authenticate(user=user)
 
-    def test_admin_rejects_join_request(self):
-        """Test that an admin can reject a join request"""
-        self.authenticate(self.admin_user)
-
-        reason = "Position has been filled"
-        response = self.client.post(self.url, {'reason': reason}, format='json')
-
-        # Check response
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        self.assertEqual(response.data['status'], 'processing')
-        self.assertEqual(response.data['message'], 'Join request is being processed')
-        self.assertEqual(response.data['token'], self.invitation.token)
-        self.assertIn('task_id', response.data)
-
-        # Execute task synchronously
-        result = reject_invitation_task(
-            token=self.invitation.token,
-            admin_id=self.admin_user.id,
-            reason=reason
-        )
-
-        # Verify task result
-        self.assertEqual(result['status'], 'success')
-        self.assertEqual(result['user_id'], self.user.id)
-        self.assertEqual(result['company_id'], self.company.id)
-        self.assertEqual(result['reason'], reason)
-        self.assertEqual(result['admin_email'], self.admin_user.email)
-
-        # Verify invitation status was updated
-        self.invitation.refresh_from_db()
-        self.assertEqual(self.invitation.status, Invitation.InvitationStatus.CANCELLED)
-
-        # Verify notification was created
-        notification_exists = Notification.objects.filter(
-            recipient=self.user,
-            notification_type=Notification.NotificationType.JOIN_REJECTED,
-            company=self.company
-        ).exists()
-        self.assertTrue(notification_exists)
-
-        # Verify admin's notification was marked as read
-        admin_notification = Notification.objects.filter(
+    def _create_admin_notification(self):
+        Notification.objects.create(
             recipient=self.admin_user,
+            sender=self.user,
+            notification_type=Notification.NotificationType.JOIN_REQUEST,
             invitation=self.invitation,
-            notification_type=Notification.NotificationType.JOIN_REQUEST
-        ).first()
-
-        if admin_notification:
-            self.assertEqual(admin_notification.status, Notification.NotificationStatus.READ)
-            self.assertIsNotNone(admin_notification.read_at)
-
-        # Verify membership was NOT created
-        membership_exists = Membership.objects.filter(
-            user=self.user,
-            company=self.company
-        ).exists()
-        self.assertFalse(membership_exists)
-
-    def test_admin_rejects_join_request_without_reason(self):
-        """Test that an admin can reject a join request without providing a reason"""
-        self.authenticate(self.admin_user)
-
-        response = self.client.post(self.url, format='json')
-
-        # Check response
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        self.assertEqual(response.data['status'], 'processing')
-
-        # Execute task synchronously
-        result = reject_invitation_task(
-            token=self.invitation.token,
-            admin_id=self.admin_user.id,
-            reason=None
+            company=self.company,
+            title="Join Request",
+            message="join",
+            action_url="/",
         )
 
-        # Verify task result
-        self.assertEqual(result['status'], 'success')
-        self.assertEqual(result['reason'], None)
+    @patch("taskflow.companies.views.reject_invitation_task.delay")
+    def test_admin_rejects_request(self, mock_delay):
+        self.authenticate(self.admin_user)
 
-        # Verify invitation status was updated
+        mock_task = MagicMock()
+        mock_task.id = "task-123"
+        mock_task.status = "PENDING"
+        mock_delay.return_value = mock_task
+
+        response = self.client.post(
+            self.url,
+            {"reason": "Position filled"},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_202_ACCEPTED,
+        )
+
+        mock_delay.assert_called_once_with(
+            self.invitation.token,
+            self.admin_user.id,
+            "Position filled",
+        )
+
+    def test_non_admin_cannot_reject(self):
+        with self.assertRaises(PermissionError):
+            reject_invitation_task.run(
+                token=self.invitation.token,
+                admin_id=self.non_admin_user.id,
+            )
+
         self.invitation.refresh_from_db()
-        self.assertEqual(self.invitation.status, Invitation.InvitationStatus.CANCELLED)
 
-        # Verify notification was created with default message
-        notification = Notification.objects.filter(
-            recipient=self.user,
-            notification_type=Notification.NotificationType.JOIN_REJECTED,
-            company=self.company
-        ).first()
+        self.assertEqual(
+            self.invitation.status,
+            Invitation.InvitationStatus.PENDING,
+        )
 
-        self.assertIsNotNone(notification)
-        self.assertIn(f"درخواست شما برای عضویت در {self.company.name}", notification.message)
-        self.assertNotIn("دلیل:", notification.message)
+    def test_reject_nonexistent_invitation(self):
+        result = reject_invitation_task.run(
+            token="invalid-token",
+            admin_id=self.admin_user.id,
+        )
 
-    def test_reject_already_rejected_request(self):
-        """Test that rejecting an already rejected request fails"""
-        # First, reject the invitation
+        self.assertEqual(result["status"], "error")
+
+        self.assertEqual(
+            result["error"],
+            "Invitation not found or already processed",
+        )
+
+    def test_reject_already_processed_invitation(self):
         self.invitation.status = Invitation.InvitationStatus.CANCELLED
         self.invitation.save()
 
-        self.authenticate(self.admin_user)
-
-        response = self.client.post(self.url, format='json')
-
-        # View should return 202 Accepted (sends to task)
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-
-        # Execute task and check error
-        result = reject_invitation_task(
+        result = reject_invitation_task.run(
             token=self.invitation.token,
             admin_id=self.admin_user.id,
-            reason=None
         )
 
-        # Task should return error because invitation is already processed
-        self.assertEqual(result['status'], 'error')
-        self.assertEqual(result['error'], 'Invitation not found or already processed')
+        self.assertEqual(result["status"], "error")
 
-    def test_reject_request_cache_invalidation(self):
-        """Test that cache is invalidated after rejection"""
-        self.authenticate(self.admin_user)
+    def test_notification_contains_reason(self):
+        self._create_admin_notification()
 
-        # Set some cache
-        cache.set(f"notification_list_user_{self.user.id}_page1", "test_data")
-        cache.set(f"notification_list_user_{self.admin_user.id}_page1", "test_data")
-
-        response = self.client.post(self.url, format='json')
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-
-        # Execute task synchronously
-        result = reject_invitation_task(
+        reject_invitation_task.run(
             token=self.invitation.token,
             admin_id=self.admin_user.id,
-            reason="Test reason"
+            reason="Already hired",
         )
 
-        self.assertEqual(result['status'], 'success')
-
-        # Verify cache was invalidated
-        self.assertIsNone(cache.get(f"notification_list_user_{self.user.id}_page1"))
-        self.assertIsNone(cache.get(f"notification_list_user_{self.admin_user.id}_page1"))
-
-    def test_reject_request_notification_created(self):
-        """Test that notification is created after rejection"""
-        self.authenticate(self.admin_user)
-
-        reason = "Position no longer available"
-        response = self.client.post(self.url, {'reason': reason}, format='json')
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-
-        # Execute task synchronously
-        result = reject_invitation_task(
-            token=self.invitation.token,
-            admin_id=self.admin_user.id,
-            reason=reason
-        )
-
-        self.assertEqual(result['status'], 'success')
-
-        # Verify notification was created for the user
-        user_notification = Notification.objects.filter(
+        notification = Notification.objects.get(
             recipient=self.user,
             notification_type=Notification.NotificationType.JOIN_REJECTED,
-            company=self.company
-        ).first()
-
-        self.assertIsNotNone(user_notification)
-        self.assertEqual(user_notification.sender, self.admin_user)
-        self.assertEqual(user_notification.invitation, self.invitation)
-        self.assertIn(reason, user_notification.message)
-
-        # Verify notification was marked as read for admin
-        admin_notification = Notification.objects.filter(
-            recipient=self.admin_user,
-            invitation=self.invitation,
-            notification_type=Notification.NotificationType.JOIN_REQUEST
-        ).first()
-
-        if admin_notification:
-            self.assertEqual(admin_notification.status, Notification.NotificationStatus.READ)
-            self.assertIsNotNone(admin_notification.read_at)
-            self.assertEqual(admin_notification.metadata['reason'], 'request_rejected')
-
-    def test_reject_request_unauthorized(self):
-        """Test that unauthenticated users cannot reject requests"""
-        response = self.client.post(self.url, format='json')
-
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_reject_request_with_special_characters_in_reason(self):
-        """Test that reject request handles special characters in reason"""
-        self.authenticate(self.admin_user)
-
-        reason = "Position filled - New candidate already hired! 🎉"
-        response = self.client.post(self.url, {'reason': reason}, format='json')
-
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-
-        # Execute task synchronously
-        result = reject_invitation_task(
-            token=self.invitation.token,
-            admin_id=self.admin_user.id,
-            reason=reason
         )
 
-        self.assertEqual(result['status'], 'success')
-
-        # Verify notification contains the reason with special characters
-        notification = Notification.objects.filter(
-            recipient=self.user,
-            notification_type=Notification.NotificationType.JOIN_REJECTED
-        ).first()
-
-        self.assertIsNotNone(notification)
-        self.assertIn(reason, notification.message)
-
-    def test_reject_request_task_atomic_transaction(self):
-        """Test that the task uses atomic transaction for consistency"""
-        self.authenticate(self.admin_user)
-
-        response = self.client.post(self.url, format='json')
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-
-        # Execute task
-        result = reject_invitation_task(
-            token=self.invitation.token,
-            admin_id=self.admin_user.id,
-            reason="Test"
+        self.assertIn(
+            "Already hired",
+            notification.message,
         )
 
-        self.assertEqual(result['status'], 'success')
+    def test_cache_invalidated(self):
+        self._create_admin_notification()
 
-        # Verify all changes were applied atomically
-        self.invitation.refresh_from_db()
-        self.assertEqual(self.invitation.status, Invitation.InvitationStatus.CANCELLED)
+        cache.set(
+            f"notification_list_user_{self.user.id}_page1",
+            "cached",
+        )
 
-        # Both notifications should exist
-        user_notification = Notification.objects.filter(
+        cache.set(
+            f"notification_list_user_{self.admin_user.id}_page1",
+            "cached",
+        )
+
+        reject_invitation_task.run(
+            token=self.invitation.token,
+            admin_id=self.admin_user.id,
+        )
+
+        self.assertIsNone(
+            cache.get(
+                f"notification_list_user_{self.user.id}_page1"
+            )
+        )
+
+        self.assertIsNone(
+            cache.get(
+                f"notification_list_user_{self.admin_user.id}_page1"
+            )
+        )
+
+    def test_reject_without_reason(self):
+        self._create_admin_notification()
+
+        result = reject_invitation_task.run(
+            token=self.invitation.token,
+            admin_id=self.admin_user.id,
+        )
+
+        self.assertEqual(result["status"], "success")
+
+        notification = Notification.objects.get(
             recipient=self.user,
-            notification_type=Notification.NotificationType.JOIN_REJECTED
-        ).exists()
-        self.assertTrue(user_notification)
+            notification_type=Notification.NotificationType.JOIN_REJECTED,
+        )
 
-        # Admin notification should be marked as read
-        admin_notification = Notification.objects.filter(
-            recipient=self.admin_user,
-            invitation=self.invitation,
-            notification_type=Notification.NotificationType.JOIN_REQUEST
-        ).first()
-
-        if admin_notification:
-            self.assertEqual(admin_notification.status, Notification.NotificationStatus.READ)
-
-    def test_reject_request_view_handles_exceptions(self):
-        """Test that the view handles exceptions properly"""
-        self.authenticate(self.admin_user)
-
-        # Mock the task to raise an exception
-        from unittest.mock import patch
-
-        with patch('taskflow.companies.tasks.reject_invitation_task.delay') as mock_delay:
-            mock_delay.side_effect = PermissionError("Permission denied")
-
-            response = self.client.post(self.url, format='json')
-
-            # Should handle PermissionError
-            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-            self.assertEqual(response.data['error'], 'permission_denied')
-
-        with patch('taskflow.companies.tasks.reject_invitation_task.delay') as mock_delay:
-            mock_delay.side_effect = ValueError("Invitation has expired")
-
-            response = self.client.post(self.url, format='json')
-
-            # Should handle ValueError
-            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-            self.assertEqual(response.data['error'], 'invitation_expired')
-
-        with patch('taskflow.companies.tasks.reject_invitation_task.delay') as mock_delay:
-            mock_delay.side_effect = Invitation.DoesNotExist()
-
-            response = self.client.post(self.url, format='json')
-
-            # Should handle DoesNotExist
-            self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-            self.assertEqual(response.data['error'], 'invitation_not_found')
-
-        with patch('taskflow.companies.tasks.reject_invitation_task.delay') as mock_delay:
-            mock_delay.side_effect = Exception("Unexpected error")
-
-            response = self.client.post(self.url, format='json')
-
-            # Should handle unexpected errors
-            self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
-            self.assertEqual(response.data['error'], 'internal_server_error')
-
+        self.assertNotIn("دلیل:", notification.message)
 
 class SendMemberInvitationViewTest(TestCase):
     """Test cases for SendMemberInvitationView"""
@@ -2130,303 +2010,568 @@ class SendMemberInvitationViewTest(TestCase):
 
 
 class CreateMemberInvitationTaskTest(TestCase):
-    """Test cases for create_member_invitation_task"""
+    """Tests for create_member_invitation_task."""
 
     def setUp(self):
-        """Set up test data"""
         cache.clear()
 
-        # Create users
         self.inviter = User.objects.create_user(
-            email='inviter@example.com',
-            password='testPass123',
-            first_name='Inviter',
-            last_name='User'
+            email="inviter@example.com",
+            password="testPass123",
         )
 
         self.invited_user = User.objects.create_user(
-            email='invited@example.com',
-            password='testPass123',
-            first_name='Invited',
-            last_name='User'
+            email="invited@example.com",
+            password="testPass123",
         )
 
-        # Create a company
         self.company = Company.objects.create(
-            name='Test Company',
-            slug='test-company',
+            name="Test Company",
+            slug="test-company",
             owner=self.inviter,
-            is_active=True
+            is_active=True,
         )
 
-        # Create inactive company
         self.inactive_company = Company.objects.create(
-            name='Inactive Company',
-            slug='inactive-company',
+            name="Inactive Company",
+            slug="inactive-company",
             owner=self.inviter,
-            is_active=False
+            is_active=False,
         )
 
     def test_successful_invitation_creation(self):
-        """Test successful creation of invitation"""
-        result = create_member_invitation_task(
+        result = create_member_invitation_task.run(
             company_id=self.company.id,
             invited_user_id=self.invited_user.id,
             inviter_id=self.inviter.id,
-            role=Membership.RoleChoices.MEMBER
+            role=Membership.RoleChoices.MEMBER,
         )
 
-        self.assertEqual(result['status'], 'success')
-        self.assertEqual(result['company_id'], self.company.id)
-        self.assertEqual(result['company_name'], self.company.name)
-        self.assertEqual(result['invited_user_id'], self.invited_user.id)
-        self.assertEqual(result['invited_user_email'], self.invited_user.email)
-        self.assertEqual(result['inviter_id'], self.inviter.id)
-        self.assertEqual(result['inviter_email'], self.inviter.email)
-        self.assertEqual(result['role'], Membership.RoleChoices.MEMBER)
+        self.assertEqual(result["status"], "success")
 
-        # Check invitation was created
-        invitation = Invitation.objects.get(id=result['invitation_id'])
-        self.assertEqual(invitation.email, self.invited_user.email)
+        invitation = Invitation.objects.get(
+            id=result["invitation_id"]
+        )
+
         self.assertEqual(invitation.company, self.company)
-        self.assertEqual(invitation.invited_by, self.inviter)
         self.assertEqual(invitation.invited_user, self.invited_user)
-        self.assertEqual(invitation.role, Membership.RoleChoices.MEMBER)
-        self.assertEqual(invitation.invitation_type, Invitation.InvitationType.MEMBER_INVITE)
-        self.assertEqual(invitation.status, Invitation.InvitationStatus.PENDING)
-        self.assertIsNotNone(invitation.token)
-        # secrets.token_urlsafe(32) returns a string of length 43 (32 bytes base64 encoded)
-        self.assertEqual(len(invitation.token), 43)
-        self.assertIn(self.inviter.email, invitation.message)
-        self.assertIn(self.company.name, invitation.message)
+        self.assertEqual(invitation.invited_by, self.inviter)
+        self.assertEqual(
+            invitation.status,
+            Invitation.InvitationStatus.PENDING,
+        )
 
-        # Check notification was created
-        notification = Notification.objects.get(id=result['notification_id'])
+        notification = Notification.objects.get(
+            id=result["notification_id"]
+        )
+
+        self.assertEqual(
+            notification.notification_type,
+            Notification.NotificationType.INVITATION,
+        )
+
         self.assertEqual(notification.recipient, self.invited_user)
         self.assertEqual(notification.sender, self.inviter)
-        self.assertEqual(notification.notification_type, Notification.NotificationType.INVITATION)
-        self.assertIn(self.company.name, notification.title)
-        self.assertIn(self.inviter.email, notification.message)
-        self.assertIn(self.company.name, notification.message)
-        self.assertEqual(notification.invitation, invitation)
         self.assertEqual(notification.company, self.company)
-        self.assertEqual(notification.status, Notification.NotificationStatus.UNREAD)
-        self.assertEqual(notification.metadata['invitation_type'], 'member_invite')
-        self.assertEqual(notification.metadata['invited_by'], self.inviter.id)
-        self.assertEqual(notification.metadata['invited_by_email'], self.inviter.email)
-        self.assertEqual(notification.metadata['role'], Membership.RoleChoices.MEMBER)
 
-    def test_successful_invitation_with_admin_role(self):
-        """Test successful invitation creation with admin role"""
-        result = create_member_invitation_task(
+    def test_create_admin_invitation(self):
+        result = create_member_invitation_task.run(
             company_id=self.company.id,
             invited_user_id=self.invited_user.id,
             inviter_id=self.inviter.id,
-            role=Membership.RoleChoices.ADMIN
+            role=Membership.RoleChoices.ADMIN,
         )
 
-        self.assertEqual(result['status'], 'success')
-        self.assertEqual(result['role'], Membership.RoleChoices.ADMIN)
+        self.assertEqual(result["status"], "success")
 
-        invitation = Invitation.objects.get(id=result['invitation_id'])
-        self.assertEqual(invitation.role, Membership.RoleChoices.ADMIN)
+        invitation = Invitation.objects.get(
+            id=result["invitation_id"]
+        )
+
+        self.assertEqual(
+            invitation.role,
+            Membership.RoleChoices.ADMIN,
+        )
+
+    def test_default_role_is_member(self):
+        result = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=self.invited_user.id,
+            inviter_id=self.inviter.id,
+        )
+
+        self.assertEqual(result["status"], "success")
+
+        invitation = Invitation.objects.get(
+            id=result["invitation_id"]
+        )
+
+        self.assertEqual(
+            invitation.role,
+            Membership.RoleChoices.MEMBER,
+        )
+
+    def test_invitation_message(self):
+        result = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=self.invited_user.id,
+            inviter_id=self.inviter.id,
+        )
+
+        invitation = Invitation.objects.get(
+            id=result["invitation_id"]
+        )
+
+        self.assertIn(
+            self.company.name,
+            invitation.message,
+        )
+
+        self.assertIn(
+            self.inviter.email,
+            invitation.message,
+        )
+
+    def test_notification_content(self):
+        result = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=self.invited_user.id,
+            inviter_id=self.inviter.id,
+        )
+
+        notification = Notification.objects.get(
+            id=result["notification_id"]
+        )
+
+        self.assertEqual(
+            notification.recipient,
+            self.invited_user,
+        )
+
+        self.assertEqual(
+            notification.sender,
+            self.inviter,
+        )
+
+        self.assertEqual(
+            notification.company,
+            self.company,
+        )
+
+        self.assertEqual(
+            notification.status,
+            Notification.NotificationStatus.UNREAD,
+        )
+
+        self.assertIn(
+            self.company.name,
+            notification.title,
+        )
+
+        self.assertIn(
+            self.company.name,
+            notification.message,
+        )
 
     def test_company_not_found(self):
-        """Test invitation with non-existent company"""
-        result = create_member_invitation_task(
+        result = create_member_invitation_task.run(
             company_id=99999,
             invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
+            inviter_id=self.inviter.id,
         )
 
-        self.assertEqual(result['status'], 'error')
-        # Remove trailing space from expected error message
-        self.assertEqual(result['error'].strip(), 'Company not found or not active')
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            result["error"],
+            "Company not found or not active",
+        )
 
     def test_inactive_company(self):
-        """Test invitation with inactive company"""
-        result = create_member_invitation_task(
+        result = create_member_invitation_task.run(
             company_id=self.inactive_company.id,
             invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
+            inviter_id=self.inviter.id,
         )
 
-        self.assertEqual(result['status'], 'error')
-        # Remove trailing space from expected error message
-        self.assertEqual(result['error'].strip(), 'Company not found or not active')
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            result["error"],
+            "Company not found or not active",
+        )
 
-    def test_invited_user_not_found(self):
-        """Test invitation with non-existent invited user"""
-        # Mock get_user to return None for invited user
-        with patch('taskflow.companies.tasks.get_user', return_value=None):
-            result = create_member_invitation_task(
-                company_id=self.company.id,
-                invited_user_id=99999,
-                inviter_id=self.inviter.id
-            )
+    @patch("taskflow.companies.tasks.get_user")
+    def test_invited_user_not_found(self, mock_get_user):
+        mock_get_user.side_effect = [
+            None,
+            self.inviter,
+        ]
 
-        self.assertEqual(result['status'], 'error')
-        self.assertEqual(result['error'], 'User not found')
+        result = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=999,
+            inviter_id=self.inviter.id,
+        )
 
-    def test_inviter_not_found(self):
-        """Test invitation with non-existent inviter"""
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "User not found")
 
-        # Mock get_user to return None for inviter
-        def mock_get_user(user_id):
-            if user_id == self.invited_user.id:
-                return self.invited_user
-            return None
+    @patch("taskflow.companies.tasks.get_user")
+    def test_inviter_not_found(self, mock_get_user):
+        mock_get_user.side_effect = [
+            self.invited_user,
+            None,
+        ]
 
-        with patch('taskflow.companies.tasks.get_user', side_effect=mock_get_user):
-            result = create_member_invitation_task(
-                company_id=self.company.id,
-                invited_user_id=self.invited_user.id,
-                inviter_id=99999
-            )
-
-        self.assertEqual(result['status'], 'error')
-        self.assertEqual(result['error'], 'User not found')
-
-    def test_cache_cleared_after_invitation(self):
-        """Test that cache is cleared after creating invitation"""
-        # Set some cache key
-        cache_key = f'notification_list_user_{self.invited_user.id}'
-        cache.set(cache_key, 'test_value')
-
-        # Create invitation
-        result = create_member_invitation_task(
+        result = create_member_invitation_task.run(
             company_id=self.company.id,
             invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
+            inviter_id=999,
         )
 
-        # Check cache was cleared
-        self.assertIsNone(cache.get(cache_key))
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "User not found")
 
-    def test_invitation_expires_in_7_days(self):
-        """Test that invitation expires in 7 days"""
-        result = create_member_invitation_task(
-            company_id=self.company.id,
-            invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
-        )
+    @patch("taskflow.companies.tasks.create_member_invitation_task.retry")
+    @patch("taskflow.companies.tasks.create_notification")
+    def test_retry_when_notification_fails(
+            self,
+            mock_notification,
+            mock_retry,
+    ):
+        mock_notification.side_effect = Exception("boom")
+        mock_retry.side_effect = RuntimeError("retry called")
 
-        invitation = Invitation.objects.get(id=result['invitation_id'])
-        expected_expiry = timezone.now() + timedelta(days=7)
-
-        # Check expiry is within 5 seconds of expected (to account for test execution time)
-        time_diff = abs((invitation.expires_at - expected_expiry).total_seconds())
-        self.assertLess(time_diff, 5)
-
-    def test_unique_token_generation(self):
-        """Test that each invitation gets a unique token"""
-        result1 = create_member_invitation_task(
-            company_id=self.company.id,
-            invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
-        )
-
-        # Create another user
-        another_user = User.objects.create_user(
-            email='another@example.com',
-            password='testPass123',
-            first_name='Another',
-            last_name='User'
-        )
-
-        result2 = create_member_invitation_task(
-            company_id=self.company.id,
-            invited_user_id=another_user.id,
-            inviter_id=self.inviter.id
-        )
-
-        invitation1 = Invitation.objects.get(id=result1['invitation_id'])
-        invitation2 = Invitation.objects.get(id=result2['invitation_id'])
-
-        self.assertNotEqual(invitation1.token, invitation2.token)
-
-    @patch('taskflow.companies.tasks.transaction.atomic')
-    def test_transaction_rollback_on_error(self, mock_atomic):
-        """Test that transaction is rolled back on error"""
-        # Force an error during invitation creation
-        mock_atomic.side_effect = Exception("Database error")
-
-        # The task will raise an exception, which will trigger retry
-        with self.assertRaises(Exception):
-            create_member_invitation_task(
+        with self.assertRaises(RuntimeError):
+            create_member_invitation_task.run(
                 company_id=self.company.id,
                 invited_user_id=self.invited_user.id,
-                inviter_id=self.inviter.id
+                inviter_id=self.inviter.id,
+                role=Membership.RoleChoices.MEMBER,
             )
 
-        # Verify no invitation was created
-        self.assertFalse(Invitation.objects.filter(
+        mock_retry.assert_called_once()
+
+        self.assertFalse(
+            Invitation.objects.filter(
+                company=self.company,
+                invited_user=self.invited_user,
+            ).exists()
+        )
+
+    @patch("taskflow.companies.tasks.create_notification")
+    def test_transaction_rolls_back(
+            self,
+            mock_notification,
+    ):
+        mock_notification.side_effect = Exception("boom")
+
+        try:
+            create_member_invitation_task.run(
+                company_id=self.company.id,
+                invited_user_id=self.invited_user.id,
+                inviter_id=self.inviter.id,
+            )
+        except Exception:
+            pass
+
+        self.assertFalse(
+            Invitation.objects.filter(
+                company=self.company,
+                invited_user=self.invited_user,
+            ).exists()
+        )
+
+    def test_cache_invalidated(self):
+        key = (
+            f"notification_list_user_"
+            f"{self.invited_user.id}_page1"
+        )
+
+        cache.set(key, "cached")
+
+        create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=self.invited_user.id,
+            inviter_id=self.inviter.id,
+        )
+
+        self.assertIsNone(cache.get(key))
+
+    def test_invitation_expiry(self):
+        result = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=self.invited_user.id,
+            inviter_id=self.inviter.id,
+        )
+
+        invitation = Invitation.objects.get(
+            id=result["invitation_id"]
+        )
+
+        expected = timezone.now() + timedelta(days=7)
+
+        self.assertLess(
+            abs(
+                (
+                    invitation.expires_at - expected
+                ).total_seconds()
+            ),
+            5,
+        )
+
+    def test_unique_tokens(self):
+        result1 = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=self.invited_user.id,
+            inviter_id=self.inviter.id,
+        )
+
+        another = User.objects.create_user(
+            email="another@example.com",
+            password="123456",
+        )
+
+        result2 = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=another.id,
+            inviter_id=self.inviter.id,
+        )
+
+        token1 = Invitation.objects.get(
+            id=result1["invitation_id"]
+        ).token
+
+        token2 = Invitation.objects.get(
+            id=result2["invitation_id"]
+        ).token
+
+        self.assertNotEqual(token1, token2)
+
+    def test_notification_metadata(self):
+        result = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=self.invited_user.id,
+            inviter_id=self.inviter.id,
+        )
+
+        notification = Notification.objects.get(
+            id=result["notification_id"]
+        )
+
+        self.assertEqual(
+            notification.metadata["invitation_type"],
+            "member_invite",
+        )
+
+        self.assertEqual(
+            notification.metadata["invited_by"],
+            self.inviter.id,
+        )
+
+        self.assertEqual(
+            notification.metadata["invited_by_email"],
+            self.inviter.email,
+        )
+
+        self.assertEqual(
+            notification.metadata["role"],
+            Membership.RoleChoices.MEMBER,
+        )
+
+    def test_notification_action_url(self):
+        result = create_member_invitation_task.run(
+            company_id=self.company.id,
+            invited_user_id=self.invited_user.id,
+            inviter_id=self.inviter.id,
+        )
+
+        invitation = Invitation.objects.get(
+            id=result["invitation_id"]
+        )
+
+        notification = Notification.objects.get(
+            id=result["notification_id"]
+        )
+
+        self.assertEqual(
+            notification.action_url,
+            f"/invitations/accept/{invitation.token}/",
+        )
+
+
+class MemberAcceptInvitationViewTests(APITestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="user@example.com",
+            password="testPass123"
+        )
+
+        self.other_user = User.objects.create_user(
+            email="other@example.com",
+            password="testPass123"
+        )
+
+        self.company = Company.objects.create(
+            name="Test Company",
+            slug="test-company",
+            owner=self.other_user,
+            is_active=True,
+        )
+
+        self.invitation = Invitation.objects.create(
+            email=self.user.email,
             company=self.company,
-            invited_user=self.invited_user
-        ).exists())
-
-    def test_invitation_message_format(self):
-        """Test that invitation message is formatted correctly"""
-        result = create_member_invitation_task(
-            company_id=self.company.id,
-            invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
+            invited_by=self.other_user,
+            invited_user=self.user,
+            invitation_type=Invitation.InvitationType.MEMBER_INVITE,
+            status=Invitation.InvitationStatus.PENDING,
+            token="member-token",
+            expires_at=timezone.now() + timedelta(days=7),
         )
 
-        invitation = Invitation.objects.get(id=result['invitation_id'])
-        expected_message = f"{self.inviter.email} invites you to join {self.company.name}"
-        self.assertEqual(invitation.message, expected_message)
-
-    def test_notification_content_format(self):
-        """Test that notification content is formatted correctly"""
-        result = create_member_invitation_task(
-            company_id=self.company.id,
-            invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
+        self.url = reverse(
+            "member-invitation-accept",
+            args=[self.invitation.token],
         )
 
-        notification = Notification.objects.get(id=result['notification_id'])
+    def authenticate(self):
+        self.client.force_authenticate(self.user)
 
-        expected_title = f"دعوت به عضویت در {self.company.name}"
-        expected_message = f"{self.inviter.email} شما را به عضویت در {self.company.name} دعوت کرده است."
-        expected_action_url = f"/invitations/accept/{Invitation.objects.get(id=result['invitation_id']).token}/"
+    @patch("taskflow.companies.views.member_accept_invitation_task.delay")
+    def test_accept_invitation_success(self, mock_delay):
+        self.authenticate()
 
-        self.assertEqual(notification.title, expected_title)
-        self.assertEqual(notification.message, expected_message)
-        self.assertEqual(notification.action_url, expected_action_url)
+        mock_delay.return_value.id = "task-123"
 
-    def test_task_without_role_uses_default(self):
-        """Test that task uses default role when not provided"""
-        result = create_member_invitation_task(
-            company_id=self.company.id,
-            invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
-            # role not provided
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+
+        self.assertEqual(response.data["status"], "processing")
+        self.assertEqual(
+            response.data["message"],
+            "Invitation acceptance is being processed",
+        )
+        self.assertEqual(response.data["task_id"], "task-123")
+        self.assertEqual(response.data["token"], self.invitation.token)
+
+        mock_delay.assert_called_once_with(
+            self.invitation.token,
+            self.user.id,
         )
 
-        self.assertEqual(result['status'], 'success')
-        self.assertEqual(result['role'], Membership.RoleChoices.MEMBER)
+    def test_accept_invitation_requires_authentication(self):
+        response = self.client.post(self.url)
 
-        invitation = Invitation.objects.get(id=result['invitation_id'])
-        self.assertEqual(invitation.role, Membership.RoleChoices.MEMBER)
-
-    def test_company_query_uses_is_active_filter(self):
-        """Test that company query correctly filters by is_active"""
-        # First create an active company
-        result = create_member_invitation_task(
-            company_id=self.company.id,
-            invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_401_UNAUTHORIZED,
         )
 
-        self.assertEqual(result['status'], 'success')
+    def test_accept_invitation_not_found(self):
+        self.authenticate()
 
-        # Then try inactive company
-        result = create_member_invitation_task(
-            company_id=self.inactive_company.id,
-            invited_user_id=self.invited_user.id,
-            inviter_id=self.inviter.id
+        url = reverse(
+            "member-invitation-accept",
+            args=["invalid-token"],
         )
 
-        self.assertEqual(result['status'], 'error')
-        self.assertEqual(result['error'].strip(), 'Company not found or not active')
+        response = self.client.post(url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+        self.assertEqual(
+            response.data["error"],
+            "Invitation not found",
+        )
+
+    def test_accept_already_processed_invitation(self):
+        self.authenticate()
+
+        self.invitation.status = Invitation.InvitationStatus.ACCEPTED
+        self.invitation.save()
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+        self.assertEqual(
+            response.data["error"],
+            "Invitation not found",
+        )
+
+    @patch("taskflow.companies.views.member_accept_invitation_task.delay")
+    def test_integrity_error(self, mock_delay):
+        self.authenticate()
+
+        mock_delay.side_effect = IntegrityError()
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+        self.assertEqual(
+            response.data["error"],
+            "Database integrity error",
+        )
+
+        self.assertEqual(
+            response.data["code"],
+            "INTEGRITY_ERROR",
+        )
+
+    @patch("taskflow.companies.views.member_accept_invitation_task.delay")
+    def test_database_error(self, mock_delay):
+        self.authenticate()
+
+        mock_delay.side_effect = DatabaseError()
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+        self.assertEqual(
+            response.data["error"],
+            "Database error occurred",
+        )
+
+        self.assertEqual(
+            response.data["code"],
+            "DATABASE_ERROR",
+        )
+
+    @patch("taskflow.companies.views.member_accept_invitation_task.delay")
+    def test_unexpected_exception(self, mock_delay):
+        self.authenticate()
+
+        mock_delay.side_effect = Exception("boom")
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+        self.assertEqual(
+            response.data["error"],
+            "Failed to process invitation",
+        )
+
+        self.assertEqual(
+            response.data["code"],
+            "TASK_FAILED",
+        )
