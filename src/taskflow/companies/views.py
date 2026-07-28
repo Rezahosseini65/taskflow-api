@@ -16,7 +16,7 @@ from .tasks import (
     create_join_request_task,
     accept_invitation_task,
     reject_invitation_task,
-    create_member_invitation_task
+    create_member_invitation_task, member_accept_invitation_task
 )
 from .serializers import (
     CompanyDetailSerializer,
@@ -463,4 +463,65 @@ class SendMemberInvitationView(APIView):
                     'code': 'TASK_FAILED'
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class MemberAcceptInvitationView(APIView):
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieJWTAuthentication]
+
+    def post(self, request, token):
+
+        try:
+            invitation = Invitation.objects.get(
+                token=token,
+                status=Invitation.InvitationStatus.PENDING,
+            )
+        except Invitation.DoesNotExist:
+            return Response(
+                {"error": "Invitation not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            task = member_accept_invitation_task.delay(
+                token,
+                request.user.id,
+            )
+
+            return Response(
+                {
+                    "status": "processing",
+                    "message": "Invitation acceptance is being processed",
+                    "task_id": task.id,
+                    "token": token,
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        except IntegrityError:
+            return Response(
+                {
+                    "error": "Database integrity error",
+                    "code": "INTEGRITY_ERROR",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        except DatabaseError:
+            return Response(
+                {
+                    "error": "Database error occurred",
+                    "code": "DATABASE_ERROR",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        except Exception:
+            return Response(
+                {
+                    "error": "Failed to process invitation",
+                    "code": "TASK_FAILED",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
