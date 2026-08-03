@@ -386,6 +386,119 @@ class UserLoginViewTestCase(APITestCase):
         self.assertIn('samesite', refresh_cookie.keys())
 
 
+class IsStaffDefaultTestCase(APITestCase):
+    """
+    Regression tests for C-2: is_staff must not default to True.
+
+    A user created through any ordinary path (the public registration API or
+    CustomUserManager.create_user) must not be able to reach /admin/.
+    Superuser creation must keep is_staff=True.
+    """
+
+    def setUp(self):
+        from .views import UserRegisterView
+        UserRegisterView.throttle_classes = []
+
+        self.register_url = reverse('user-register')
+
+    def test_registered_user_is_not_staff(self):
+        response = self.client.post(
+            self.register_url,
+            {
+                "email": "c2_register@example.com",
+                "password": "StrongPassword123",
+                "confirm_password": "StrongPassword123",
+            },
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        user = CustomUser.objects.get(email="c2_register@example.com")
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        self.assertTrue(user.is_active)
+
+    def test_create_user_defaults_to_not_staff(self):
+        user = CustomUser.objects.create_user(
+            email="c2_create_user@example.com",
+            password="StrongPassword123"
+        )
+
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+
+    def test_model_field_default_is_false(self):
+        self.assertFalse(CustomUser._meta.get_field('is_staff').default)
+
+    def test_create_superuser_is_still_staff(self):
+        superuser = CustomUser.objects.create_superuser(
+            email="c2_superuser@example.com",
+            password="StrongPassword123"
+        )
+
+        self.assertTrue(superuser.is_staff)
+        self.assertTrue(superuser.is_superuser)
+
+    def test_create_user_can_still_opt_in_to_staff(self):
+        user = CustomUser.objects.create_user(
+            email="c2_explicit_staff@example.com",
+            password="StrongPassword123",
+            is_staff=True
+        )
+
+        self.assertTrue(user.is_staff)
+
+
+class DemoteAccidentalStaffTestCase(APITestCase):
+    """
+    Regression tests for the C-2 data migration predicate.
+
+    The migration itself is a no-op on a fresh test database, so the predicate is
+    exercised directly here against rows that reproduce the pre-fix state.
+    """
+
+    def test_demotes_only_unconfigured_staff(self):
+        from django.contrib.auth.models import Group, Permission
+        import importlib
+
+        plain_staff = CustomUser.objects.create_user(
+            email="c2_plain_staff@example.com", password="StrongPassword123", is_staff=True
+        )
+        superuser = CustomUser.objects.create_superuser(
+            email="c2_migration_su@example.com", password="StrongPassword123"
+        )
+        grouped_staff = CustomUser.objects.create_user(
+            email="c2_grouped_staff@example.com", password="StrongPassword123", is_staff=True
+        )
+        grouped_staff.groups.add(Group.objects.create(name="c2-editors"))
+
+        permitted_staff = CustomUser.objects.create_user(
+            email="c2_permitted_staff@example.com", password="StrongPassword123", is_staff=True
+        )
+        permitted_staff.user_permissions.add(Permission.objects.first())
+
+        migration_module = importlib.import_module(
+            "taskflow.accounts.migrations.0003_alter_customuser_is_staff"
+        )
+
+        class FakeApps:
+            def get_model(self, app_label, model_name):
+                return CustomUser
+
+        migration_module.demote_accidental_staff(FakeApps(), None)
+
+        plain_staff.refresh_from_db()
+        superuser.refresh_from_db()
+        grouped_staff.refresh_from_db()
+        permitted_staff.refresh_from_db()
+
+        self.assertFalse(plain_staff.is_staff)
+        self.assertTrue(superuser.is_staff)
+        self.assertTrue(grouped_staff.is_staff)
+        self.assertTrue(permitted_staff.is_staff)
+
+
 class UserLoginViewTransactionTestCase(TransactionTestCase):
 
     def test_concurrent_logins(self):
